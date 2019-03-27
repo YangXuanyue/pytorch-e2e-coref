@@ -9,6 +9,7 @@ import data_utils
 import re
 from itertools import chain
 from allennlp.training.optimizers import DenseSparseAdam
+import metrics
 
 
 class Runner:
@@ -29,7 +30,7 @@ class Runner:
         )
 
         self.epoch_idx = 0
-        self.max_acc = 0.
+        self.max_f1 = 0.
 
     @staticmethod
     def compute_prediction_batch(logits_batch):
@@ -78,13 +79,11 @@ class Runner:
             next_logging_pct = .5
             start_time = time.time()
 
-            for pct, input_tensors in data_utils.gen_batches('train'):
+            for pct, example_idx, input_tensors in data_utils.gen_batches('train'):
                 batch_num += 1
 
-                antecedent_scores, antecedent_labels = self.model(*input_tensors)
-
+                loss = self.model.compute_loss(*input_tensors)
                 self.optimizer.zero_grad()
-                loss = self.compute_loss(antecedent_scores, antecedent_labels)
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.model.get_trainable_params(), max_norm=configs.max_grad_norm)
                 self.lr_scheduler.step()
@@ -103,7 +102,7 @@ class Runner:
                     )
                     next_logging_pct += 5.
 
-                    self.validate()
+                    self.evaluate()
 
             avg_epoch_loss /= batch_num
             avg_epoch_acc /= batch_num
@@ -113,93 +112,86 @@ class Runner:
                 f'avg_train_time: {time.time() - start_time}'
             )
 
-            self.validate()
+            self.evaluate()
 
-    def validate(self, name='valid', saves_results=False):
+    def evaluate(self, name='valid', saves_results=False):
         with torch.no_grad():
-            log('validating')
+            log('evaluating')
+            evaluator = metrics.CorefEvaluator()
 
             self.model.eval()
             batch_num = 0
             avg_epoch_loss = 0.
-            epoch_acc = 0.
+            epoch_f1 = 0.
             next_logging_pct = 10.
             start_time = time.time()
             predictions = []
-            labels = []
 
-            for pct, input_tensors in data_utils.gen_batches(name):
+            for pct, example_idx, input_tensors in data_utils.gen_batches(name):
                 batch_num += 1
+                (
+                    top_start_idxes, top_end_idxes, predicted_antecedent_idxes,
+                    predicted_clusters, span_to_predicted_cluster
+                ) = self.model.predict(*input_tensors)
 
-                antecedent_scores, antecedent_labels = self.model(*input_tensors)
-                loss = self.compute_loss(antecedent_scores, antecedent_labels)
-                avg_epoch_loss += loss.item()
+                gold_clusters = data_utils.get_gold_clusters(name, example_idx)
+                gold_clusters = [
+                    tuple(tuple(span) for span in cluster)
+                    for cluster in gold_clusters
+                ]
+                span_to_gold_cluster = {
+                    span: cluster
+                    for cluster in gold_clusters
+                    for span in cluster
+                }
+
+                evaluator.update(
+                    predicted=predicted_clusters,
+                    gold=gold_clusters,
+                    mention_to_predicted=span_to_predicted_cluster,
+                    mention_to_gold=span_to_gold_cluster
+                )
 
                 if pct >= next_logging_pct:
                     log(
                         f'{int(pct)}%, '
-                        f'avg_train_loss: {avg_epoch_loss / batch_num}, '
                         f'time: {time.time() - start_time}'
+                        f'f1: {evaluator.get_f1()}'
                     )
                     next_logging_pct += 5.
 
-            avg_epoch_loss /= batch_num
+            epoch_f1 = evaluator.get_f1()
             log(
-                f'avg_valid_loss: {avg_epoch_loss} '
                 f'avg_valid_time: {time.time() - start_time}'
+                f'f1: {epoch_f1}'
             )
+
 
             if saves_results:
                 data_utils.save_predictions(name, predictions)
 
             if name == 'valid':
-                if epoch_acc > self.max_acc:
-                    self.max_acc = epoch_acc
+                if epoch_f1 > self.max_f1:
+                    self.max_f1 = epoch_f1
                     # self.save_ckpt()
 
-                    max_acc_file = open(configs.max_acc_path)
+                    max_f1_file = open(configs.max_f1_path)
 
-                    if epoch_acc > float(max_acc_file.readline().strip()):
-                        max_acc_file.close()
-                        max_acc_file = open(configs.max_acc_path, 'w')
-                        print(epoch_acc, file=max_acc_file)
-                        print(configs.seed, file=max_acc_file)
+                    if epoch_f1 > float(max_f1_file.readline().strip()):
+                        max_f1_file.close()
+                        max_f1_file = open(configs.max_f1_path, 'w')
+                        print(epoch_f1, file=max_f1_file)
                         self.save_ckpt()
 
-                    max_acc_file.close()
+                    max_f1_file.close()
 
-                # self.lr_scheduler.step(epoch_acc)
-                self.lr_scheduler.step(-avg_epoch_loss)
-
-    def test(self):
-        with torch.no_grad():
-            log('testing')
-
-            self.model.eval()
-            batch_num = 0
-            next_logging_pct = 10.
-            start_time = time.time()
-            predictions = []
-
-            for pct, (text_batch, _) in data_utils.gen_batches('test'):
-                batch_num += 1
-                # [batch_size, class_num]
-                logits_batch = self.model(text_batch)
-                predictions.extend(Runner.compute_prediction_batch(logits_batch))
-
-                if pct >= next_logging_pct:
-                    log(
-                        f'{int(pct)}%, '
-                        f'time: {time.time() - start_time}'
-                    )
-                    next_logging_pct += 10.
-
-            data_utils.save_predictions('test', predictions)
+                # self.lr_scheduler.step(epoch_f1)
+                # self.lr_scheduler.step(-avg_epoch_loss)
 
     def get_ckpt(self):
         return {
             'epoch_idx': self.epoch_idx,
-            'max_acc': self.max_acc,
+            'max_f1': self.max_f1,
             'seed': configs.seed,
             'model': self.model.state_dict(),
             'optimizer': self.optimizer.state_dict(),
@@ -209,7 +201,7 @@ class Runner:
 
     def set_ckpt(self, ckpt_dict):
         self.epoch_idx = ckpt_dict['epoch_idx'] + 1
-        self.max_acc = ckpt_dict['max_acc']
+        self.max_f1 = ckpt_dict['max_f1']
 
         model_state_dict = self.model.state_dict()
         model_state_dict.update(

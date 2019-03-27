@@ -47,9 +47,13 @@ class Dataset(tud.Dataset):
         return len(self.examples)
 
     def __getitem__(self, idx):
-        return self.tensorize_example(self.examples[idx])
+        return self.tensorize_example(idx)
 
-    def tensorize_example(self, example):
+    def get_gold_clusters(self, example_idx):
+        return self.examples[example_idx]['clusters']
+
+    def tensorize_example(self, example_idx):
+        example = self.examples[example_idx]
         clusters = example['clusters']
 
         gold_spans = sorted(
@@ -159,10 +163,11 @@ class Dataset(tud.Dataset):
         )
 
         example_tensors = (
+            example_idx,
             glove_embedding_seq_batch, head_embedding_seq_batch, elmo_layer_outputs_batch,
             char_ids_seq_batch, sent_len_batch, speaker_ids, genre_id,
             gold_start_idxes, gold_end_idxes, gold_cluster_ids,
-            cand_start_idxes, cand_end_idxes, cand_cluster_ids, cand_sent_idxes
+            cand_start_idxes, cand_end_idxes, cand_cluster_ids, cand_sent_idxes,
         )
 
         if self.name == 'train' and sent_num > configs.max_sent_num:
@@ -183,10 +188,11 @@ class Dataset(tud.Dataset):
 
     def truncate_example(
             self,
+            example_idx,
             glove_embedding_seq_batch, head_embedding_seq_batch,
             elmo_layer_outputs_batch, char_ids_seq_batch, sent_len_batch, speaker_ids, genre,
             gold_start_idxes, gold_end_idxes, gold_cluster_ids,
-            cand_start_idxes, cand_end_idxes, cand_cluster_ids, cand_sent_idxes
+            cand_start_idxes, cand_end_idxes, cand_cluster_ids, cand_sent_idxes,
     ):
         sent_num = glove_embedding_seq_batch.shape[0]
         assert sent_num > configs.max_sent_num
@@ -219,11 +225,12 @@ class Dataset(tud.Dataset):
         cand_sent_idxes = cand_sent_idxes[cand_mask] - start_sent_idx
 
         return (
+            example_idx,
             glove_embedding_seq_batch, head_embedding_seq_batch,
             elmo_layer_outputs_batch, char_ids_seq_batch, sent_len_batch, speaker_ids,
             genre, gold_start_idxes, gold_end_idxes, gold_cluster_ids,
             cand_start_idxes,
-            cand_end_idxes, cand_cluster_ids, cand_sent_idxes
+            cand_end_idxes, cand_cluster_ids, cand_sent_idxes,
         )
 
 
@@ -236,13 +243,21 @@ datasets = {
 def get_dataset_size(name):
     return len(datasets[name])
 
+def get_gold_clusters(name, example_idx):
+    return datasets[name].get_gold_clusters(example_idx)
+
 
 def collate(batch):
     # batch_size = 1
     tensors, = batch
-    return tuple(
-        map(lambda tensor: torch.as_tensor(tensor).cuda(), tensors)
+    example_idx, *tensors = tensors
+    return (
+        example_idx,
+        tuple(
+            map(lambda tensor: torch.as_tensor(tensor).cuda(), tensors)
+        )
     )
+
 
 data_loaders = {
     name: tud.DataLoader(
@@ -260,10 +275,11 @@ data_loaders = {
 def gen_batches(name):
     instance_num = 0
 
-    for batch in data_loaders[name]:
+    for example_idx, batch in data_loaders[name]:
         instance_num += len(batch[-1])
         pct = instance_num * 100. / len(datasets[name])
-        yield pct, batch
+        yield pct, example_idx, batch
+
 
 def save_predictions(name, predictions):
     # if name == 'valid':

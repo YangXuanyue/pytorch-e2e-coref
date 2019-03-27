@@ -45,7 +45,7 @@ class Model(nn.Module):
 
         # -> [k]
 
-        self.gate = nn.Sequential(
+        self.attended_span_embedding_gate = nn.Sequential(
             nn.Linear(configs.span_width_embedding_dim * 2, configs.span_width_embedding_dim),
             nn.Sigmoid()
         )
@@ -277,7 +277,7 @@ class Model(nn.Module):
         pruned_antecedent_num = min(configs.max_antecedent_num, top_cand_num)
 
         (
-            top_antecedent_idxes_of_spans, top_antecedents_mask_of_spans,
+            top_antecedent_idxes_of_spans, top_antecedent_mask_of_spans,
             top_fast_antecedent_scores_of_spans, top_antecedent_offsets_of_spans
         ) = self.prune(top_span_embeddings, top_span_mention_scores, pruned_antecedent_num)
 
@@ -297,58 +297,44 @@ class Model(nn.Module):
                 genre_embedding
             )
 
-            # [top_cand_num, pruned_antecedent_num + 1]
-            top_antecedent_weights_of_spans = F.softmax(
+            # [top_cand_num, 1 + pruned_antecedent_num]
+            top_antecedent_attentions_of_spans = F.softmax(
                 torch.cat(
                     (dummy_scores, top_antecedent_scores_of_spans), dim=1
                 )
             )
-            # [top_cand_num, pruned_antecedent_num + 1, span_embedding_dim]
+            # [top_cand_num, 1 + pruned_antecedent_num, span_embedding_dim]
             top_antecedent_embeddings_of_spans = torch.cat(
                 (top_span_embeddings.view(top_cand_num, 1, -1), top_antecedent_embeddings_of_spans), dim=1
             )
-
+            # [top_cand_num, span_embedding_dim]
             attended_top_span_embeddings = \
                 (
-                        top_antecedent_weights_of_spans.view(top_cand_num, -1, 1) * top_antecedent_embeddings_of_spans
+                        top_antecedent_attentions_of_spans.view(top_cand_num, -1,
+                                                                1) * top_antecedent_embeddings_of_spans
                 ).sum(1)
 
-
-            g = self.gate(
+            g = self.attended_span_embedding_gate(
                 torch.cat(
                     (top_span_embeddings, attended_top_span_embeddings), dim=1
                 )
             )
 
-            top_span_embeddings = g * attended_top_span_embeddings + (
-                        1. - g) * top_span_embeddings  # [top_cand_num, emb]
+            top_span_embeddings = g * attended_top_span_embeddings + (1. - g) * top_span_embeddings
 
+        # [top_cand_num, 1 + pruned_antecedent_num]
         top_antecedent_scores_of_spans = torch.cat(
             (dummy_scores, top_antecedent_scores_of_spans), dim=1
         )
 
-
+        # [top_cand_num, pruned_antecedent_num]
         top_antecedent_cluster_ids_of_spans = top_span_cluster_ids[top_antecedent_idxes_of_spans]
-        top_antecedent_cluster_ids_of_spans += torch.log(top_antecedents_mask_of_spans.float()).int()
 
-        antecedent_indicators_of_spans = top_antecedent_cluster_ids_of_spans == top_span_cluster_ids.view(-1, 1)
-
-        non_dummy_span_mask = (top_span_cluster_ids > 0).view(-1, 1)
-
-
-        pairwise_labels = antecedent_indicators_of_spans & non_dummy_span_mask
-
-        # pairwise_labels = tf.logical_and(antecedent_indicators_of_spans, non_dummy_span_mask)  # [top_cand_num, pruned_antecedent_num]
-
-        dummy_labels = ~pairwise_labels.any(dim=1, keepdim=True)
-
-        top_antecedent_labels = torch.cat(
-            (dummy_labels, pairwise_labels), dim=1
+        return (
+            cand_mention_scores, top_start_idxes, top_end_idxes, top_span_cluster_ids,
+            top_antecedent_idxes_of_spans, top_antecedent_cluster_ids_of_spans,
+            top_antecedent_scores_of_spans, top_antecedent_mask_of_spans
         )
-
-        # top_antecedent_labels = tf.concat([dummy_labels, pairwise_labels], 1)  # [top_cand_num, pruned_antecedent_num + 1]
-
-        return top_antecedent_scores_of_spans, top_antecedent_labels
 
     def prune(self, top_span_embeddings, top_span_mention_scores, pruned_antecedent_num):
         top_span_num, _ = top_span_embeddings.shape
@@ -369,12 +355,12 @@ class Model(nn.Module):
         )
 
         span_idxes = span_idxes.view(-1, 1)
-        top_antecedents_mask_of_spans = antecedents_mask_of_spans[span_idxes, top_antecedent_idxes_of_spans]
+        top_antecedent_mask_of_spans = antecedents_mask_of_spans[span_idxes, top_antecedent_idxes_of_spans]
         top_fast_antecedent_scores_of_spans = fast_antecedent_scores_of_spans[span_idxes, top_antecedent_idxes_of_spans]
         top_antecedent_offsets_of_spans = antecedent_offsets_of_spans[span_idxes, top_antecedent_idxes_of_spans]
 
         return (
-            top_antecedent_idxes_of_spans, top_antecedents_mask_of_spans,
+            top_antecedent_idxes_of_spans, top_antecedent_mask_of_spans,
             top_fast_antecedent_scores_of_spans, top_antecedent_offsets_of_spans
         )
 
@@ -444,3 +430,79 @@ class Model(nn.Module):
             identity_mask_batch * offsets_batch + (1 - identity_mask_batch) * log_space_idxes_batch,
             min=0, max=9
         )
+
+    def compute_loss(self, *input_tensors):
+        (
+            cand_mention_scores, top_start_idxes, top_end_idxes, top_span_cluster_ids,
+            top_antecedent_idxes_of_spans, top_antecedent_cluster_ids_of_spans,
+            top_antecedent_scores_of_spans, top_antecedent_mask_of_spans
+        ) = self(*input_tensors)
+
+        top_antecedent_cluster_ids_of_spans += torch.log(top_antecedent_mask_of_spans.float()).int()
+        # [top_cand_num, pruned_antecedent_num]
+        antecedent_indicators_of_spans = top_antecedent_cluster_ids_of_spans == top_span_cluster_ids.view(-1, 1)
+        # [top_cand_num, 1]
+        non_dummy_span_mask = (top_span_cluster_ids > 0).view(-1, 1)
+        # [top_cand_num, pruned_antecedent_num]
+        non_dummy_antecedent_indicators_of_spans = antecedent_indicators_of_spans & non_dummy_span_mask
+        # [top_cand_num, 1]
+        dummy_span_indicators = ~non_dummy_antecedent_indicators_of_spans.any(dim=1, keepdim=True)
+        # [top_cand_num, 1 + pruned_antecedent_num]
+        antecedent_indicators_of_spans = torch.cat(
+            (dummy_span_indicators, non_dummy_antecedent_indicators_of_spans), dim=1
+        )
+        top_antecedent_scores_of_spans += torch.log(antecedent_indicators_of_spans.float())
+        # [top_cand_num]
+        log_marginalized_prob_of_spans = (
+                torch.logsumexp(top_antecedent_scores_of_spans, dim=1)
+                - torch.logsumexp(top_antecedent_scores_of_spans, dim=1)
+        )
+
+        return -log_marginalized_prob_of_spans.sum()
+
+    def predict(self, *input_tensors):
+        (
+            cand_mention_scores, top_start_idxes, top_end_idxes, top_span_cluster_ids,
+            top_antecedent_idxes_of_spans, top_antecedent_cluster_ids_of_spans,
+            top_antecedent_scores_of_spans, top_antecedent_mask_of_spans
+        ) = self(*input_tensors)
+
+        predicted_antecedent_idxes = []
+
+        for span_idx, loc in enumerate(torch.argmax(top_antecedent_scores_of_spans, dim=1) - 1):
+            if loc < 0:
+                predicted_antecedent_idxes.append(-1)
+            else:
+                predicted_antecedent_idxes.append(top_antecedent_idxes_of_spans[span_idx, loc].item())
+
+        span_to_predicted_cluster_id = {}
+        predicted_clusters = []
+
+        for span_idx, antecedent_idx in enumerate(predicted_antecedent_idxes):
+            if antecedent_idx < 0:
+                continue
+
+            assert span_idx > antecedent_idx
+
+            antecedent_span = top_start_idxes[antecedent_idx], top_end_idxes[antecedent_idx]
+
+            if antecedent_span in span_to_predicted_cluster_id:
+                predicted_cluster_id = span_to_predicted_cluster_id[antecedent_span]
+            else:
+                predicted_cluster_id = len(predicted_clusters)
+                predicted_clusters.append([antecedent_span])
+                span_to_predicted_cluster_id[antecedent_span] = predicted_cluster_id
+
+            span = top_start_idxes[span_idx], top_end_idxes[span_idx]
+            predicted_clusters[predicted_cluster_id].append(span)
+            span_to_predicted_cluster_id[span] = predicted_cluster_id
+
+        predicted_clusters = [tuple(cluster) for cluster in predicted_clusters]
+        span_to_predicted_cluster = {
+            span: predicted_clusters[cluster_id]
+            for span, cluster_id in span_to_predicted_cluster_id.items()
+        }
+
+        # [top_cand_num], [top_cand_num], [top_cand_num]
+        return top_start_idxes, top_end_idxes, predicted_antecedent_idxes, \
+               predicted_clusters, span_to_predicted_cluster

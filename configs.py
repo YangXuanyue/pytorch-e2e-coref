@@ -165,7 +165,7 @@ dropout_prob = .2
 momentum = .9
 l2_weight_decay = 5e-4  # args.weight_decay
 # feature_num = 512
-max_acc_path = 'max_acc.txt'
+max_f1_path = 'max_f1.txt'
 
 epoch_num = 12
 
