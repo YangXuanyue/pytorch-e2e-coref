@@ -8,6 +8,7 @@ import os
 arg_parser = ap.ArgumentParser()
 arg_parser.add_argument('-m', '--mode', default='train')
 arg_parser.add_argument('-c', '--ckpt', default=None)
+arg_parser.add_argument('-tgpu', action='store_true', default=False)
 # arg_parser.add_argument('-d', '--device', type=int, default=0)
 arg_parser.add_argument('-b', action='store_true', default=False)
 arg_parser.add_argument('-l', action='store_true', default=False)
@@ -20,6 +21,8 @@ mode = args.mode
 training = args.mode == 'train'
 validating = args.mode == 'dev'
 testing = args.mode == 'test'
+debugging = args.mode == 'debug'
+testing_gpu = args.tgpu
 # ckpt.best is trained with data_part_num = 3
 ckpt_id = args.ckpt
 # device_id = args.device
@@ -60,8 +63,11 @@ data_dir = Dir('topicclass')
 
 best_ckpt_path = f'{ckpts_dir}/ckpt.best'
 
+uses_glove_embeddings = False
+uses_char_embeddings = False
+
 glove_embeddings_path = 'glove.840B.300d.txt.filtered' if training else 'glove.840B.300d.txt'
-glove_embedding_dim = 300
+glove_embedding_dim = 300 if uses_glove_embeddings else 0
 head_embeddings_path = 'glove_50_300_2.txt'
 raw_head_embedding_dim = 300
 
@@ -74,25 +80,26 @@ char_embedding_dim = 8
 cnn_kernel_widths = [3, 4, 5]
 cnn_kernel_nums = [100, 100, 100]
 # kernel_nums = [100, 100, 100]
-char_feature_num = sum(cnn_kernel_nums)
+char_feature_num = sum(cnn_kernel_nums) if uses_char_embeddings else 0
 
+head_embedding_dim = raw_head_embedding_dim + char_feature_num
+
+# rnn_hidden_size = 200 * 2
 rnn_hidden_size = 200 * 2
 rnn_layer_num = 3
+
 
 genre_embedding_dim = 20
 span_width_embedding_dim = 20
 speaker_pair_embedding_dim = 20
-antecedent_offset_embedding_dim = 20
-span_embedding_dim = rnn_hidden_size * 3 + span_width_embedding_dim
+ant_offset_embedding_dim = 20
+span_embedding_dim = rnn_hidden_size * 2 + span_width_embedding_dim + head_embedding_dim
 
+ant_feature_embedding_dim = genre_embedding_dim + speaker_pair_embedding_dim + ant_offset_embedding_dim
 
+pair_embedding_dim = span_embedding_dim * 3 + ant_feature_embedding_dim
 
-antecedent_feature_embedding_dim = genre_embedding_dim + speaker_pair_embedding_dim + antecedent_offset_embedding_dim
-
-pair_embedding_dim = span_embedding_dim * 3 + antecedent_feature_embedding_dim
-
-
-tot_embedding_dim = elmo_embedding_dim + char_feature_num
+tot_embedding_dim = glove_embedding_dim + char_feature_num + elmo_embedding_dim
 
 max_span_width = 30
 
@@ -100,7 +107,7 @@ ffnn_hidden_size = 150
 
 top_span_ratio = .4
 
-max_antecedent_num = 50
+max_ant_num = 50
 
 coref_depth = 2
 
@@ -130,7 +137,7 @@ word_embeddings_path = 'word_embeddings_files/' \
 word_embedding_dim = 300
 inits_embedder = True
 freezes_embeddings = True  # False
-embedder_training_epoch_num = 12
+embedder_training_epoch_num = 100
 uses_new_embeddings = False
 
 hidden_size = 256
@@ -167,7 +174,7 @@ l2_weight_decay = 5e-4  # args.weight_decay
 # feature_num = 512
 max_f1_path = 'max_f1.txt'
 
-epoch_num = 12
+epoch_num = 100
 
 # uses_center_loss = False
 # uses_pairwise_sim_loss = False

@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=4,5 python test_gpu.py -tgpu

@@ -1,6 +1,5 @@
 import configs
 from model import Model
-from modules import SelfAttendedDecoder
 from model_utils import *
 import os
 from log import log
@@ -10,11 +9,12 @@ import re
 from itertools import chain
 from allennlp.training.optimizers import DenseSparseAdam
 import metrics
+import traceback
 
 
 class Runner:
     def __init__(self):
-        self.model = Model()
+        self.model = Model().cuda()
 
         self.optimizer = optim.Adam(
             # filter(lambda p: p.requires_grad, self.model.parameters()),
@@ -42,19 +42,29 @@ class Runner:
         prediction_batch = Runner.compute_prediction_batch(logits_batch)
         return (prediction_batch == label_batch).type(torch.cuda.FloatTensor).mean().item()
 
-    @staticmethod
-    def compute_loss(antecedent_scores, antecedent_labels):
-        gold_scores = antecedent_scores + torch.log(antecedent_labels.float())
+    # @staticmethod
+    # def compute_loss(ant_scores, ant_labels):
+    #     gold_scores = ant_scores + torch.log(ant_labels.float())
+    #
+    #     # gold_scores = ant_scores + tf.log(tf.to_float(ant_labels))  # [k, max_ant + 1]
+    #
+    #     marginalized_gold_scores = F.log_softmax(gold_scores, dim=1)
+    #
+    #     # marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [1])  # [k]
+    #     log_norm = F.log_softmax(ant_scores, dim=1)
+    #     # log_norm = tf.reduce_logsumexp(ant_scores, [1])  # [k]
+    #
+    #     return log_norm - marginalized_gold_scores  # [k]
 
-        # gold_scores = antecedent_scores + tf.log(tf.to_float(antecedent_labels))  # [k, max_ant + 1]
-
-        marginalized_gold_scores = F.log_softmax(gold_scores, dim=1)
-
-        # marginalized_gold_scores = tf.reduce_logsumexp(gold_scores, [1])  # [k]
-        log_norm = F.log_softmax(antecedent_scores, dim=1)
-        # log_norm = tf.reduce_logsumexp(antecedent_scores, [1])  # [k]
-
-        return log_norm - marginalized_gold_scores  # [k]
+    def test_gpu(self):
+        example_idx, input_tensors = data_utils.datasets['train'][2674]
+        loss = self.model.compute_loss(*input_tensors)
+        print(loss.item())
+        self.optimizer.zero_grad()
+        # torch.cuda.empty_cache()
+        loss.backward()
+        nn.utils.clip_grad_norm_(self.model.get_trainable_params(), max_norm=configs.max_grad_norm)
+        self.optimizer.step()
 
     def train(self):
         if configs.ckpt_id or configs.loads_ckpt or configs.loads_best_ckpt:
@@ -79,15 +89,25 @@ class Runner:
             next_logging_pct = .5
             start_time = time.time()
 
-            for pct, example_idx, input_tensors in data_utils.gen_batches('train'):
+            for pct, example_idx, input_tensors in data_utils.gen_batches('train' if configs.training else 'test'):
                 batch_num += 1
 
+                # print(example_idx)
+
+                # try:
                 loss = self.model.compute_loss(*input_tensors)
+                # except RuntimeError as x:
+                #     print(x)
+                #     exit()
+
                 self.optimizer.zero_grad()
+
                 loss.backward()
+
                 nn.utils.clip_grad_norm_(self.model.get_trainable_params(), max_norm=configs.max_grad_norm)
-                self.lr_scheduler.step()
+
                 self.optimizer.step()
+                self.lr_scheduler.step()
 
                 # if not configs.freezes_embeddings and epoch_idx < configs.embedder_training_epoch_num:
                 #     self.embedder_optimizer.step()
@@ -102,7 +122,7 @@ class Runner:
                     )
                     next_logging_pct += 5.
 
-                    self.evaluate()
+                    # self.evaluate()
 
             avg_epoch_loss /= batch_num
             avg_epoch_acc /= batch_num
@@ -114,15 +134,16 @@ class Runner:
 
             self.evaluate()
 
-    def evaluate(self, name='valid', saves_results=False):
+    def evaluate(self, name='dev', saves_results=False):
+        from collections import Counter
+        # span_len_cnts = Counter()
+
         with torch.no_grad():
             log('evaluating')
             evaluator = metrics.CorefEvaluator()
 
             self.model.eval()
             batch_num = 0
-            avg_epoch_loss = 0.
-            epoch_f1 = 0.
             next_logging_pct = 10.
             start_time = time.time()
             predictions = []
@@ -130,9 +151,11 @@ class Runner:
             for pct, example_idx, input_tensors in data_utils.gen_batches(name):
                 batch_num += 1
                 (
-                    top_start_idxes, top_end_idxes, predicted_antecedent_idxes,
+                    top_start_idxes, top_end_idxes, predicted_ant_idxes,
                     predicted_clusters, span_to_predicted_cluster
                 ) = self.model.predict(*input_tensors)
+
+                # span_len_cnts.update((top_end_idxes - top_start_idxes + 1).tolist())
 
                 gold_clusters = data_utils.get_gold_clusters(name, example_idx)
                 gold_clusters = [
@@ -155,22 +178,23 @@ class Runner:
                 if pct >= next_logging_pct:
                     log(
                         f'{int(pct)}%, '
-                        f'time: {time.time() - start_time}'
+                        f'time: {time.time() - start_time} '
                         f'f1: {evaluator.get_f1()}'
                     )
                     next_logging_pct += 5.
 
-            epoch_f1 = evaluator.get_f1()
+            epoch_precision, epoch_recall, epoch_f1 = evaluator.get_prf()
             log(
-                f'avg_valid_time: {time.time() - start_time}'
-                f'f1: {epoch_f1}'
+                f'avg_valid_time: {time.time() - start_time}\n'
+                f'precision: {epoch_precision}\n'
+                f'recall: {epoch_recall}\n'
+                f'f1: {epoch_f1}\n'
             )
-
 
             if saves_results:
                 data_utils.save_predictions(name, predictions)
 
-            if name == 'valid':
+            if name == 'dev':
                 if epoch_f1 > self.max_f1:
                     self.max_f1 = epoch_f1
                     # self.save_ckpt()
@@ -253,9 +277,16 @@ class Runner:
 
 
 if __name__ == '__main__':
-    trainer = Runner()
+    runner = Runner()
 
-    if configs.training:
-        trainer.train()
-    else:
-        trainer.test()
+    if configs.training or configs.debugging:
+        runner.train()
+        # try:
+        #     runner.train()
+        # except:
+        #     traceback.print_stack()
+        #     breakpoint()
+    elif configs.validating:
+        runner.evaluate()
+        ...
+        # trainer.test()

@@ -1,9 +1,11 @@
 import configs
 import os
-import numpy as np
+# import numpy as np
 import json
 from collections import Counter, defaultdict
 from itertools import chain
+from model_utils import *
+import time
 
 
 class Vocab:
@@ -164,22 +166,29 @@ class WordEmbedder:
         return self.size
 
     def load_embeddings(self):
-        default_embedding = np.zeros(self.size)
+        default_embedding = torch.zeros(self.dim)
         embeddings = defaultdict(lambda: default_embedding)
 
         # vocab_size = None
 
+        if configs.debugging or configs.testing_gpu:
+            return embeddings
+
+        start_time = time.time()
+
         with open(self.path) as embeddings_file:
             for i, line in enumerate(embeddings_file.readlines()):
                 word, *embedding = line.split(' ')
-                embedding = np.array(
+                embedding = torch.as_tensor(
                     list(map(float, embedding))
                 )
                 # word_end = line.find(" ")
                 # word = line[:word_end]
-                # embedding = np.fromstring(line[word_end + 1:], np.float32, sep=" ")
+                # embedding = np.fromstring(line[word_end + 1:], np.float3232, sep=" ")
                 # assert len(embedding) == self.size
                 embeddings[word] = embedding
+
+        print(f'loaded embeddings from {self.path} in {time.time() - start_time:.5f}s')
 
         # if vocab_size is not None:
         #     assert vocab_size == len(embeddings)

@@ -8,6 +8,7 @@ from torchvision import models as vmodels
 from torchvision import transforms
 import torch.nn.utils.rnn as rnn_utils
 from allennlp.modules.elmo import Elmo, batch_to_ids
+import allennlp.models.coreference_resolution.coref
 
 import numpy as np
 import math
@@ -53,8 +54,9 @@ def build_len_mask_batch(
         # [batch_size], []
         len_batch, max_len
 ):
+    # try:
     batch_size, = len_batch.shape
     # [batch_size, max_len]
-    idxes_batch = torch.arange(max_len).view(1, -1).repeat(batch_size, 1)
-    # [batch_size, max_len] = [batch_size, max_len] >= [batch_size, 1]
+    idxes_batch = torch.arange(max_len).view(1, -1).repeat(batch_size, 1).to(len_batch.device)
+    # [batch_size, max_len] = [batch_size, max_len] < [batch_size, 1]
     return idxes_batch < len_batch.view(-1, 1)
