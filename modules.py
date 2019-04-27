@@ -50,7 +50,7 @@ class ElmoLayerOutputMixer(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.mix_weights = nn.Parameter(torch.randn((configs.elmo_layer_num), requires_grad=True))
+        self.weights = nn.Parameter(torch.zeros((configs.elmo_layer_num), requires_grad=True))
         self.scale = nn.Parameter(torch.tensor(1., requires_grad=True))
 
     def forward(
@@ -61,7 +61,7 @@ class ElmoLayerOutputMixer(nn.Module):
         # print(layer_outputs_batch.type())
 
         # [batch_size, sent_len, elmo_embedding_dim]
-        embedding_seq_batch = layer_outputs_batch @ F.softmax(self.mix_weights, dim=-1)
+        embedding_seq_batch = layer_outputs_batch @ F.softmax(self.weights, dim=-1)
         # [batch_size, sent_len, elmo_embedding_dim]
         return embedding_seq_batch * self.scale
 
@@ -102,6 +102,8 @@ class CharCnnEmbedder(nn.Module):
         # [batch_size, max_sent_len, max_word_num]
         char_ids_seq_batch
     ):
+        # print(char_ids_seq_batch.device)
+        # print(self.embedder.weight.device)
         batch_size, max_sent_len, max_word_num = char_ids_seq_batch.shape
         # [batch_size * max_sent_len, max_word_num, char_embedding_dim]
         char_embedding_seq_batch = self.embedder(char_ids_seq_batch).view(-1, max_word_num, configs.char_embedding_dim)
@@ -336,7 +338,7 @@ class Encoder(nn.Module):
 
                 mask_batch = self.mask_sampler.sample((1, batch_size, self.hidden_size * self.direction_num))
                 mask_batch /= (1. - configs.lstm_dropout_prob)
-                curr_output_batch *= mask_batch.cuda()
+                curr_output_batch *= mask_batch.to(curr_output_batch.device)
 
             if i > 0:
                 curr_output_batch = self.highway_gates[i - 1](curr_input_batch, curr_output_batch)

@@ -5,6 +5,7 @@ import data_utils
 from functools import cmp_to_key
 import time
 
+
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
@@ -12,8 +13,8 @@ class Model(nn.Module):
         self.char_cnn_embedder = CharCnnEmbedder(
             vocab_size=data_utils.char_vocab.size, padding_id=data_utils.char_vocab.padding_id
         ) if configs.uses_char_embeddings else None
-        self.elmo_layer_output_mixer = ElmoLayerOutputMixer()
-        self.encoder = Encoder(input_size=configs.tot_embedding_dim)
+        self.elmo_layer_output_mixer = ElmoLayerOutputMixer().cuda()
+        self.encoder = Encoder(input_size=configs.tot_embedding_dim).cuda()
         self.span_width_embedder = nn.Embedding(
             num_embeddings=configs.max_span_width,
             embedding_dim=configs.span_width_embedding_dim
@@ -109,7 +110,7 @@ class Model(nn.Module):
         # [span_num, max_span_width]
         head_scores_of_spans = self.head_scores[idxes_of_spans]
 
-        # [span_num, max_span_width
+        # [span_num, max_span_width]
         span_masks = build_len_mask_batch(span_widths, configs.max_span_width).view(-1, configs.max_span_width)
         # [span_num, max_span_width]
         head_scores_of_spans += torch.log(span_masks.float()).cuda()
@@ -252,21 +253,20 @@ class Model(nn.Module):
 
         sent_num, max_sent_len, *_ = char_ids_seq_batch.shape
 
-        char_embedding_seq_batch = self.char_cnn_embedder(char_ids_seq_batch) if configs.uses_char_embeddings else None
+        char_embedding_seq_batch = self.char_cnn_embedder(char_ids_seq_batch) \
+            if configs.uses_char_embeddings else None
         elmo_embedding_seq_batch = self.elmo_layer_output_mixer(elmo_layer_outputs_batch)
 
+        embedding_seq_batches = [elmo_embedding_seq_batch]
+
+        if configs.uses_glove_embeddings:
+            embedding_seq_batches.append(glove_embedding_seq_batch)
+
+        if configs.uses_char_embeddings:
+            embedding_seq_batches.append(char_embedding_seq_batch)
+
         # [sent_num, max_sent_len, tot_embedding_dim]
-        word_embedding_seq_batch = torch.cat(
-            (
-                glove_embedding_seq_batch, char_embedding_seq_batch, elmo_embedding_seq_batch
-            ) if configs.uses_glove_embeddings else (
-                (
-                    char_embedding_seq_batch, elmo_embedding_seq_batch
-                ) if configs.uses_char_embeddings else (
-                    elmo_embedding_seq_batch,
-                )
-            ), dim=-1
-        )
+        word_embedding_seq_batch = torch.cat(embedding_seq_batches, dim=-1)
         # [sent_num, max_sent_len, head_embedding_dim]
         head_embedding_seq_batch = torch.cat(
             (
@@ -294,6 +294,8 @@ class Model(nn.Module):
         encoded_doc = self.encoder(word_embedding_seq_batch, sent_len_batch)[len_mask_batch]
 
         doc_len, _ = encoded_doc.shape
+
+        assert doc_len == sent_len_batch.sum().item()
 
         # [doc_len, head_emb]
         head_embedding_seq = head_embedding_seq_batch[len_mask_batch]
@@ -334,7 +336,7 @@ class Model(nn.Module):
         top_span_sent_idxes = cand_sent_idxes[top_span_idxes]
 
         # try:
-            # [top_cand_num]
+        # [top_cand_num]
         top_span_speaker_ids = speaker_ids[top_start_idxes]
         # except:
         #     breakpoint()

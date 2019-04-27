@@ -78,8 +78,8 @@ elmo_layer_num = 3
 
 char_embedding_dim = 8
 cnn_kernel_widths = [3, 4, 5]
-cnn_kernel_nums = [100, 100, 100]
-# kernel_nums = [100, 100, 100]
+# cnn_kernel_nums = [75, 75, 75]
+cnn_kernel_nums = [50, 50, 50]
 char_feature_num = sum(cnn_kernel_nums) if uses_char_embeddings else 0
 
 head_embedding_dim = raw_head_embedding_dim + char_feature_num
@@ -165,7 +165,7 @@ rnn_type = 'lstm'
 # rnn_type = 'gru'
 min_logit = -1e3
 
-lstm_dropout_prob = .4
+lstm_dropout_prob = .2
 embedding_dropout_prob = .5
 dropout_prob = .2
 
@@ -191,8 +191,8 @@ uses_residual_rnns = False
 
 loads_optimizer_state = not (sets_new_lr or uses_new_classifier or uses_new_encoder)
 
-lr_scheduler_factor = .5
-lr_scheduler_patience = 100
+lr_scheduler_factor = .8
+lr_scheduler_patience = 1
 
 uses_weight_dropped_rnn = True
 

@@ -17,8 +17,8 @@ import h5py
 
 char_vocab = CharVocab()
 
-if configs.uses_glove_embeddings:
-    glove_embedder = WordEmbedder(configs.glove_embeddings_path, configs.glove_embedding_dim)
+glove_embedder = WordEmbedder(configs.glove_embeddings_path, configs.glove_embedding_dim) \
+    if configs.uses_glove_embeddings else None
 
 head_embedder = WordEmbedder(configs.head_embeddings_path, configs.raw_head_embedding_dim)
 
@@ -57,10 +57,40 @@ class Dataset(tud.Dataset):
     def get_gold_clusters(self, example_idx):
         return self.examples[example_idx]['clusters']
 
+    def truncate_example(self, example):
+        sents = example['sentences']
+        sent_num = len(sents)
+        sent_lens = [len(sent) for sent in sents]
+        start_sent_idx = random.randint(0, sent_num - configs.max_sent_num)
+        end_sent_idx = start_sent_idx + configs.max_sent_num
+        start_word_idx = sum(sent_lens[:start_sent_idx])
+        end_word_idx = sum(sent_lens[:end_sent_idx])
+
+        clusters = [
+            [
+                (l - start_word_idx, r - start_word_idx)
+                for l, r in cluster
+                if start_word_idx <= l <= r < end_word_idx
+            ] for cluster in example['clusters']
+        ]
+        clusters = [cluster for cluster in clusters if cluster]
+
+        return {
+            'sentences': example['sentences'][start_sent_idx:end_sent_idx],
+            'clusters': clusters,
+            'speakers': example['speakers'][start_sent_idx:end_sent_idx],
+            'doc_key': example['doc_key'],
+            'start_sent_idx': start_sent_idx
+        }
+
     def __getitem__(self, example_idx):
         start_time = time.time()
 
         example = self.examples[example_idx]
+
+        if self.name == 'train' and len(example['sentences']) > configs.max_sent_num:
+            example = self.truncate_example(example)
+
         clusters = example['clusters']
 
         gold_spans = sorted(
@@ -139,7 +169,8 @@ class Dataset(tud.Dataset):
                 # sent_batch[i][j] = word
                 char_ids_seq_batch[i, j, :len(word)] = torch.as_tensor([char_vocab[char] for char in word])
 
-            elmo_layer_outputs_batch[i, :sent_len_batch[i]] = torch.as_tensor(doc_cache[str(i)][...])
+            sent_key = str(i + example.get('start_sent_idx', 0))
+            elmo_layer_outputs_batch[i, :sent_len_batch[i]] = torch.as_tensor(doc_cache[sent_key][...])
 
         # except:
         #     print(example_idx)
@@ -176,6 +207,20 @@ class Dataset(tud.Dataset):
 
         # [doc_len, max_span_width]
         cand_start_idxes = torch.arange(doc_len).view(-1, 1).repeat(1, configs.max_span_width)
+        # [doc_len, max_span_width]
+        cand_cluster_ids = torch.zeros_like(cand_start_idxes)
+
+        if gold_spans:
+            # try:
+            gold_end_offsets = gold_end_idxes - gold_start_idxes
+            gold_span_mask = gold_end_offsets < configs.max_span_width
+            filtered_gold_start_idxes = gold_start_idxes[gold_span_mask]
+            filtered_gold_end_offsets = gold_end_offsets[gold_span_mask]
+            filtered_gold_cluster_ids = gold_cluster_ids[gold_span_mask]
+            cand_cluster_ids[filtered_gold_start_idxes, filtered_gold_end_offsets] = filtered_gold_cluster_ids
+            # except:
+            #     breakpoint()
+
         # [doc_len * max_span_width]
         cand_end_idxes = (cand_start_idxes + torch.arange(configs.max_span_width).view(1, -1)).view(-1)
 
@@ -187,11 +232,15 @@ class Dataset(tud.Dataset):
         # [doc_len * max_span_width]
         cand_start_idxes = cand_start_idxes.view(-1)
         # [doc_len * max_span_width]
+        cand_cluster_ids = cand_cluster_ids.view(-1)
+        # [doc_len * max_span_width]
         cand_mask = cand_end_idxes < doc_len
         # [cand_num]
         cand_start_idxes = cand_start_idxes[cand_mask]
         # [cand_num]
         cand_end_idxes = cand_end_idxes[cand_mask]
+        # [cand_num]
+        cand_cluster_ids = cand_cluster_ids[cand_mask]
         # [cand_num]
         cand_start_sent_idxes = sent_idxes[cand_start_idxes]
         # [cand_num]
@@ -205,98 +254,116 @@ class Dataset(tud.Dataset):
         # [cand_num]
         cand_sent_idxes = cand_start_sent_idxes[cand_mask]
         # [cand_num]
-        cand_cluster_ids = self.get_cand_labels(
-            cand_start_idxes, cand_end_idxes,
-            gold_start_idxes, gold_end_idxes, gold_cluster_ids
-        ) if gold_spans else torch.zeros_like(cand_start_idxes, dtype=torch.long)
+        cand_cluster_ids = cand_cluster_ids[cand_mask]
 
-        example_tensors = (
+        # try:
+        #     assert (cand_cluster_ids == (self.get_cand_labels(
+        #         cand_start_idxes, cand_end_idxes,
+        #         gold_start_idxes, gold_end_idxes, gold_cluster_ids
+        #     ) if gold_spans else torch.zeros_like(cand_start_idxes, dtype=torch.long))).all()
+        # except:
+        #     breakpoint()
+
+        # # [cand_num]
+        # cand_cluster_ids = self.get_cand_labels(
+        #     cand_start_idxes, cand_end_idxes,
+        #     gold_start_idxes, gold_end_idxes, gold_cluster_ids
+        # ) if gold_spans else torch.zeros_like(cand_start_idxes, dtype=torch.long)
+
+        # example_tensors = (
+        #     example_idx,
+        #     glove_embedding_seq_batch, head_embedding_seq_batch, elmo_layer_outputs_batch,
+        #     char_ids_seq_batch, sent_len_batch, speaker_ids, genre_id,
+        #     gold_start_idxes, gold_end_idxes, gold_cluster_ids,
+        #     cand_start_idxes, cand_end_idxes, cand_cluster_ids, cand_sent_idxes,
+        # )
+
+        if self.name == 'train':  # and sent_num > configs.max_sent_num:
+            assert sent_num <= configs.max_sent_num
+            # example_tensors = self.truncate(*example_tensors)
+
+        return self.tensorize(
             example_idx,
             glove_embedding_seq_batch, head_embedding_seq_batch, elmo_layer_outputs_batch,
             char_ids_seq_batch, sent_len_batch, speaker_ids, genre_id,
             gold_start_idxes, gold_end_idxes, gold_cluster_ids,
-            cand_start_idxes, cand_end_idxes, cand_cluster_ids, cand_sent_idxes,
+            cand_start_idxes, cand_end_idxes, cand_cluster_ids, cand_sent_idxes
         )
-
-        if self.name == 'train' and sent_num > configs.max_sent_num:
-            example_tensors = self.truncate(*example_tensors)
-
-        example_tensors = self.tensorize(*example_tensors)
 
         # print(f'__getitem__: {time.time() - start_time}')
 
-        return example_tensors
+        # return example_tensors
 
-    def get_cand_labels(self, cand_start_idxes, cand_end_idxes, gold_start_idxes, gold_end_idxes, gold_cluster_ids):
-        start_time = time.time()
+    # def get_cand_labels(self, cand_start_idxes, cand_end_idxes, gold_start_idxes, gold_end_idxes, gold_cluster_ids):
+    #     start_time = time.time()
+    #
+    #     # [gold_num, cand_num]
+    #     indicator_mat = (gold_start_idxes.reshape(-1, 1) == cand_start_idxes.reshape(1, -1)) \
+    #                     & (gold_end_idxes.reshape(-1, 1) == cand_end_idxes.reshape(1, -1))
+    #
+    #     # [1, cand_num] = [1, gold_num] @ [gold_num, cand_num]
+    #     cand_labels = gold_cluster_ids.reshape(1, -1) @ indicator_mat.to(torch.long)
+    #
+    #     # print(f'get_cand_labels: {time.time() - start_time}')
+    #
+    #     # [cand_num]
+    #     return cand_labels.reshape(-1)
 
-        # [gold_num, cand_num]
-        indicator_mat = (gold_start_idxes.reshape(-1, 1) == cand_start_idxes.reshape(1, -1)) \
-                        & (gold_end_idxes.reshape(-1, 1) == cand_end_idxes.reshape(1, -1))
-
-        # [1, cand_num] = [1, gold_num] @ [gold_num, cand_num]
-        cand_labels = gold_cluster_ids.reshape(1, -1) @ indicator_mat.to(torch.long)
-
-        # print(f'get_cand_labels: {time.time() - start_time}')
-
-        # [cand_num]
-        return cand_labels.reshape(-1)
-
-    def truncate(
-        self,
-        example_idx,
-        glove_embedding_seq_batch, head_embedding_seq_batch,
-        elmo_layer_outputs_batch, char_ids_seq_batch, sent_len_batch, speaker_ids, genre_id,
-        gold_start_idxes, gold_end_idxes, gold_cluster_ids,
-        cand_start_idxes, cand_end_idxes, cand_cluster_ids, cand_sent_idxes,
-    ):
-        sent_num = len(sent_len_batch)
-        assert sent_num > configs.max_sent_num
-
-        start_sent_idx = random.randint(0, sent_num - configs.max_sent_num)
-        end_sent_idx = start_sent_idx + configs.max_sent_num
-
-        start_word_idx = sent_len_batch[:start_sent_idx].sum()
-        end_word_idx = sent_len_batch[:end_sent_idx].sum()
-
-        sent_len_batch = sent_len_batch[start_sent_idx:end_sent_idx]
-        max_sent_len = sent_len_batch.max()
-
-        if configs.uses_glove_embeddings:
-            glove_embedding_seq_batch = glove_embedding_seq_batch[start_sent_idx:end_sent_idx, :max_sent_len]
-
-        head_embedding_seq_batch = head_embedding_seq_batch[start_sent_idx:end_sent_idx, :max_sent_len]
-        elmo_layer_outputs_batch = elmo_layer_outputs_batch[start_sent_idx:end_sent_idx, :max_sent_len]
-        char_ids_seq_batch = char_ids_seq_batch[start_sent_idx:end_sent_idx, :max_sent_len]
-
-        speaker_ids = speaker_ids[start_word_idx:end_word_idx]
-
-        gold_mask = (gold_end_idxes >= start_word_idx) & (gold_start_idxes < end_word_idx)
-
-        gold_start_idxes = gold_start_idxes[gold_mask] - start_word_idx
-        gold_end_idxes = gold_end_idxes[gold_mask] - start_word_idx
-        gold_cluster_ids = gold_cluster_ids[gold_mask]
-
-        cand_mask = (cand_end_idxes >= start_word_idx) & (cand_start_idxes < end_word_idx)
-
-        cand_start_idxes = cand_start_idxes[cand_mask] - start_word_idx
-        cand_end_idxes = cand_end_idxes[cand_mask] - start_word_idx
-        cand_cluster_ids = cand_cluster_ids[cand_mask]
-        cand_sent_idxes = cand_sent_idxes[cand_mask] - start_sent_idx
-
-        # if cand_start_idxes.max() < 0:
-        #     breakpoint()
-
-        # breakpoint()
-
-        return (
-            example_idx,
-            glove_embedding_seq_batch, head_embedding_seq_batch,
-            elmo_layer_outputs_batch, char_ids_seq_batch, sent_len_batch, speaker_ids,
-            genre_id, gold_start_idxes, gold_end_idxes, gold_cluster_ids,
-            cand_start_idxes,
-            cand_end_idxes, cand_cluster_ids, cand_sent_idxes,
-        )
+    # def truncate(
+    #     self,
+    #     example_idx,
+    #     glove_embedding_seq_batch, head_embedding_seq_batch,
+    #     elmo_layer_outputs_batch, char_ids_seq_batch, sent_len_batch, speaker_ids, genre_id,
+    #     gold_start_idxes, gold_end_idxes, gold_cluster_ids,
+    #     cand_start_idxes, cand_end_idxes, cand_cluster_ids, cand_sent_idxes,
+    # ):
+    #     sent_num = len(sent_len_batch)
+    #     assert sent_num > configs.max_sent_num
+    #
+    #     start_sent_idx = random.randint(0, sent_num - configs.max_sent_num)
+    #     end_sent_idx = start_sent_idx + configs.max_sent_num
+    #
+    #     start_word_idx = sent_len_batch[:start_sent_idx].sum()
+    #     end_word_idx = sent_len_batch[:end_sent_idx].sum()
+    #
+    #     sent_len_batch = sent_len_batch[start_sent_idx:end_sent_idx]
+    #     max_sent_len = sent_len_batch.max()
+    #
+    #     if configs.uses_glove_embeddings:
+    #         glove_embedding_seq_batch = glove_embedding_seq_batch[start_sent_idx:end_sent_idx, :max_sent_len]
+    #
+    #     head_embedding_seq_batch = head_embedding_seq_batch[start_sent_idx:end_sent_idx, :max_sent_len]
+    #     elmo_layer_outputs_batch = elmo_layer_outputs_batch[start_sent_idx:end_sent_idx, :max_sent_len]
+    #     char_ids_seq_batch = char_ids_seq_batch[start_sent_idx:end_sent_idx, :max_sent_len]
+    #
+    #     speaker_ids = speaker_ids[start_word_idx:end_word_idx]
+    #
+    #     gold_mask = (gold_end_idxes >= start_word_idx) & (gold_start_idxes < end_word_idx)
+    #
+    #     gold_start_idxes = gold_start_idxes[gold_mask] - start_word_idx
+    #     gold_end_idxes = gold_end_idxes[gold_mask] - start_word_idx
+    #     gold_cluster_ids = gold_cluster_ids[gold_mask]
+    #
+    #     cand_mask = (cand_end_idxes >= start_word_idx) & (cand_start_idxes < end_word_idx)
+    #
+    #     cand_start_idxes = cand_start_idxes[cand_mask] - start_word_idx
+    #     cand_end_idxes = cand_end_idxes[cand_mask] - start_word_idx
+    #     cand_cluster_ids = cand_cluster_ids[cand_mask]
+    #     cand_sent_idxes = cand_sent_idxes[cand_mask] - start_sent_idx
+    #
+    #     # if cand_start_idxes.max() < 0:
+    #     #     breakpoint()
+    #
+    #     # breakpoint()
+    #
+    #     return (
+    #         example_idx,
+    #         glove_embedding_seq_batch, head_embedding_seq_batch,
+    #         elmo_layer_outputs_batch, char_ids_seq_batch, sent_len_batch, speaker_ids,
+    #         genre_id, gold_start_idxes, gold_end_idxes, gold_cluster_ids,
+    #         cand_start_idxes,
+    #         cand_end_idxes, cand_cluster_ids, cand_sent_idxes,
+    #     )
 
     def tensorize(
         self,
@@ -312,13 +379,13 @@ class Dataset(tud.Dataset):
             example_idx,
             # (
             # [sent_num, max_sent_len, glove_embedding_dim]
-            glove_embedding_seq_batch.cuda(0) if configs.uses_glove_embeddings else torch.tensor(0),
+            glove_embedding_seq_batch.cuda() if configs.uses_glove_embeddings else torch.tensor(0),
             # [sent_num, max_sent_len, raw_head_embedding_dim]
-            head_embedding_seq_batch.cuda(0),
+            head_embedding_seq_batch.cuda(),
             # [sent_num, max_sent_len, elmo_embedding_dim, elmo_layer_num]
-            elmo_layer_outputs_batch.cuda(0),
+            elmo_layer_outputs_batch.cuda(),
             # [sent_num, max_sent_len, max_word_len]
-            char_ids_seq_batch.cuda(0),
+            char_ids_seq_batch.cuda(),
             # [sent_num]
             sent_len_batch,
             # [doc_len]
@@ -342,20 +409,16 @@ class Dataset(tud.Dataset):
             # )
         )
 
-
 datasets = {
     name: Dataset(name)
     for name in names
 }
 
-
 def get_dataset_size(name):
     return len(datasets[name])
 
-
 def get_gold_clusters(name, example_idx):
     return datasets[name].get_gold_clusters(example_idx)
-
 
 def collate(batch):
     # batch_size = 1
@@ -382,7 +445,6 @@ def collate(batch):
         # )
     )
 
-
 data_loaders = {
     name: tud.DataLoader(
         dataset=datasets[name],
@@ -395,7 +457,6 @@ data_loaders = {
     for name in names
 }
 
-
 def gen_batches(name):
     instance_num = 0
 
@@ -405,7 +466,6 @@ def gen_batches(name):
         pct = instance_num * 100. / len(datasets[name])
         yield pct, example_idx, tensors
         # torch.cuda.empty_cache()
-
 
 def save_predictions(name, predictions):
     # if name == 'valid':
