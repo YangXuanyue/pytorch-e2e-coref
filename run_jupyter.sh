@@ -1,0 +1,1 @@
+jupyter=1 CUDA_VISIBLE_DEVICES=3 jupyter-notebook

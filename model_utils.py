@@ -52,8 +52,10 @@ def init_params(module):
 
 def build_len_mask_batch(
         # [batch_size], []
-        len_batch, max_len
+        len_batch, max_len=None
 ):
+    if max_len is None:
+        max_len = len_batch.max().item()
     # try:
     batch_size, = len_batch.shape
     # [batch_size, max_len]

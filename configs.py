@@ -5,17 +5,30 @@ import time
 import random
 import os
 
-arg_parser = ap.ArgumentParser()
-arg_parser.add_argument('-m', '--mode', default='train')
-arg_parser.add_argument('-c', '--ckpt', default=None)
-arg_parser.add_argument('-tgpu', action='store_true', default=False)
-# arg_parser.add_argument('-d', '--device', type=int, default=0)
-arg_parser.add_argument('-b', action='store_true', default=False)
-arg_parser.add_argument('-l', action='store_true', default=False)
-arg_parser.add_argument('-s', '--seed', type=int, default=None)
-arg_parser.add_argument('-wd', '--weight_decay', type=float, default=0)
+if 'jupyter' in os.environ:
+    from collections import namedtuple
+    args = namedtuple(
+        'Args', 'mode ckpt tgpu b l seed'
+    )(
+        mode='train',
+        ckpt=None,
+        tgpu=False,
+        b=False,
+        l=False,
+        seed=None
+    )
+else:
+    arg_parser = ap.ArgumentParser()
+    arg_parser.add_argument('-m', '--mode', default='train')
+    arg_parser.add_argument('-c', '--ckpt', default=None)
+    arg_parser.add_argument('-tgpu', action='store_true', default=False)
+    # arg_parser.add_argument('-d', '--device', type=int, default=0)
+    arg_parser.add_argument('-b', action='store_true', default=False)
+    arg_parser.add_argument('-l', action='store_true', default=False)
+    arg_parser.add_argument('-s', '--seed', type=int, default=None)
+    # arg_parser.add_argument('-wd', '--weight_decay', type=float, default=0)
 
-args = arg_parser.parse_args()
+    args = arg_parser.parse_args()
 
 mode = args.mode
 training = args.mode == 'train'
@@ -63,8 +76,8 @@ data_dir = Dir('topicclass')
 
 best_ckpt_path = f'{ckpts_dir}/ckpt.best'
 
-uses_glove_embeddings = False
-uses_char_embeddings = False
+uses_glove_embeddings = True
+uses_char_embeddings = True
 
 glove_embeddings_path = 'glove.840B.300d.txt.filtered' if training else 'glove.840B.300d.txt'
 glove_embedding_dim = 300 if uses_glove_embeddings else 0

@@ -14,7 +14,7 @@ class Model(nn.Module):
             vocab_size=data_utils.char_vocab.size, padding_id=data_utils.char_vocab.padding_id
         ) if configs.uses_char_embeddings else None
         self.elmo_layer_output_mixer = ElmoLayerOutputMixer().cuda()
-        self.encoder = Encoder(input_size=configs.tot_embedding_dim).cuda()
+        self.encoder = DocEncoder(input_size=configs.tot_embedding_dim).cuda()
         self.span_width_embedder = nn.Embedding(
             num_embeddings=configs.max_span_width,
             embedding_dim=configs.span_width_embedding_dim
@@ -257,24 +257,23 @@ class Model(nn.Module):
             if configs.uses_char_embeddings else None
         elmo_embedding_seq_batch = self.elmo_layer_output_mixer(elmo_layer_outputs_batch)
 
-        embedding_seq_batches = [elmo_embedding_seq_batch]
+        embedding_seq_batches = []
 
         if configs.uses_glove_embeddings:
             embedding_seq_batches.append(glove_embedding_seq_batch)
 
+        head_embedding_seq_batches = [head_embedding_seq_batch]
+
         if configs.uses_char_embeddings:
             embedding_seq_batches.append(char_embedding_seq_batch)
+            head_embedding_seq_batches.append(char_embedding_seq_batch)
+
+        embedding_seq_batches.append(elmo_embedding_seq_batch)
 
         # [sent_num, max_sent_len, tot_embedding_dim]
         word_embedding_seq_batch = torch.cat(embedding_seq_batches, dim=-1)
         # [sent_num, max_sent_len, head_embedding_dim]
-        head_embedding_seq_batch = torch.cat(
-            (
-                head_embedding_seq_batch, char_embedding_seq_batch
-            ) if configs.uses_char_embeddings else (
-                head_embedding_seq_batch,
-            ), dim=-1
-        )
+        head_embedding_seq_batch = torch.cat(head_embedding_seq_batches, dim=-1)
         # [sent_num, max_sent_len, tot_embedding_dim]
         word_embedding_seq_batch = F.dropout(
             word_embedding_seq_batch, p=configs.embedding_dropout_prob, training=self.training
@@ -291,7 +290,7 @@ class Model(nn.Module):
         #     breakpoint()
 
         # [doc_len, hidden_size]
-        encoded_doc = self.encoder(word_embedding_seq_batch, sent_len_batch)[len_mask_batch]
+        encoded_doc = self.encoder(word_embedding_seq_batch, sent_len_batch, len_mask_batch)
 
         doc_len, _ = encoded_doc.shape
 
