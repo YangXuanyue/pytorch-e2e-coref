@@ -2,12 +2,13 @@ import numpy as np
 import h5py
 import json
 from modules import ElmoEmbedder
+import configs
 
 elmo_embedder = ElmoEmbedder()
 
 for name in ('train', 'dev', 'test'):
-    with open(f'{name}.json') as examples_file, \
-            h5py.File(f'{name}.elmo.cache.hdf5', 'w') as cache_file:
+    with open(f'{configs.data_dir}/{name}.json') as examples_file, \
+            h5py.File(f'{configs.data_dir}/{name}.elmo.cache.hdf5', 'w') as cache_file:
         for example in json.load(examples_file):
             doc_cache = cache_file.create_group(example['doc_key'].replace('/', ':'))
             sents = example['sentences']
