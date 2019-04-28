@@ -109,7 +109,7 @@ class Runner:
 
                 loss.backward()
 
-                # nn.utils.clip_grad_norm_(self.model.get_trainable_params(), max_norm=configs.max_grad_norm)
+                nn.utils.clip_grad_norm_(self.model.get_trainable_params(), max_norm=configs.max_grad_norm)
 
                 self.optimizer.step()
                 self.lr_scheduler.step()

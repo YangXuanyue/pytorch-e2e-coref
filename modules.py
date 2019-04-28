@@ -143,6 +143,9 @@ class LstmCell(nn.Module):
     ):
         batch_size, _ = input_batch.shape
 
+        # print(type(self.dropout_mask_batch))
+        # print(type(hidden_state_batch))
+
         hidden_state_batch *= self.dropout_mask_batch
         # [batch_size, hidden_size], [batch_size, hidden_size], [batch_size, hidden_size]
         i, j, o = torch.split(
@@ -158,7 +161,7 @@ class LstmCell(nn.Module):
         i = torch.sigmoid(i)
         new_cell_state_batch = (1. - i) * cell_state_batch + i * torch.tanh(j)
         new_hidden_state_batch = torch.tanh(new_cell_state_batch) * torch.sigmoid(o)
-        return new_hidden_state_batch, (new_cell_state_batch, new_hidden_state_batch)
+        return new_cell_state_batch, new_hidden_state_batch
 
     def forward(
         self,
@@ -170,7 +173,7 @@ class LstmCell(nn.Module):
             torch.ones(batch_size, self.hidden_size),
             configs.lstm_dropout_prob,
             training=self.training
-        )
+        ).to(input_seq_batch.device)
 
         cell_state_batch, hidden_state_batch = map(
             lambda state: state.repeat(batch_size, 1),
@@ -179,7 +182,7 @@ class LstmCell(nn.Module):
 
         hidden_state_seq_batch = [None for t in range(max_seq_len)]
 
-        for t in (range(max_seq_len) if not self.backward else range(max_seq_len, -1, -1)):
+        for t in (range(max_seq_len) if not self.backward else range(max_seq_len -1, -1, -1)):
             cell_state_batch, hidden_state_batch = self.run_step(
                 input_seq_batch[:, t, :],
                 cell_state_batch, hidden_state_batch

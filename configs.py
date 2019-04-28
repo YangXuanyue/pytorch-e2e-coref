@@ -5,6 +5,9 @@ import time
 import random
 import os
 
+thread_num = 8
+torch.set_num_threads(thread_num)
+
 if 'jupyter' in os.environ:
     from collections import namedtuple
     args = namedtuple(
