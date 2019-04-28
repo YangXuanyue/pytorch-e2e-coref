@@ -11,7 +11,7 @@ class Model(nn.Module):
         super().__init__()
 
         self.char_cnn_embedder = CharCnnEmbedder(
-            vocab_size=data_utils.char_vocab.size, padding_id=data_utils.char_vocab.padding_id
+            vocab_size=data_utils.char_vocab.size, padding_id=data_utils.char_vocab.unk_id
         ) if configs.uses_char_embeddings else None
         self.elmo_layer_output_mixer = ElmoLayerOutputMixer().cuda()
         self.encoder = DocEncoder(input_size=configs.tot_embedding_dim).cuda()
@@ -34,9 +34,14 @@ class Model(nn.Module):
             Squeezer(dim=-1)
         )
 
-        self.fast_ant_scoring_mat = nn.Parameter(
-            torch.randn(configs.span_embedding_dim, configs.span_embedding_dim, requires_grad=True)
+        # self.fast_ant_scoring_mat = nn.Parameter(
+        #     torch.randn(configs.span_embedding_dim, configs.span_embedding_dim, requires_grad=True)
+        # )
+
+        self.src_span_projector = nn.Linear(
+            configs.span_embedding_dim, configs.span_embedding_dim
         )
+
         self.genre_embedder = nn.Embedding(
             num_embeddings=data_utils.genre_num,
             embedding_dim=configs.genre_embedding_dim
@@ -575,11 +580,14 @@ class Model(nn.Module):
         # # print(top_span_embeddings.shape)
         # top_span_embeddings = top_span_embeddings.cuda(1)
         # [top_cand_num, span_embedding_dim]
-        top_src_span_embeddings = F.dropout(top_span_embeddings, p=configs.dropout_prob, training=self.training)
-        # [span_embedding_dim, top_cand_num]
-        top_tgt_span_embeddings = F.dropout(top_span_embeddings.t(), p=configs.dropout_prob, training=self.training)
-        # [top_span_num, top_span_num]
-        return top_src_span_embeddings @ self.fast_ant_scoring_mat @ top_tgt_span_embeddings
+        top_src_span_embeddings = F.dropout(
+            self.src_span_projector(top_span_embeddings),
+            p=configs.dropout_prob, training=self.training
+        )
+        # [top_cand_num, span_embedding_dim]
+        top_tgt_span_embeddings = F.dropout(top_span_embeddings, p=configs.dropout_prob, training=self.training)
+        # [top_span_num, top_span_num] = # [top_cand_num, span_embedding_dim] @ [span_embedding_dim, top_cand_num]
+        return top_src_span_embeddings @ top_tgt_span_embeddings.t()
 
         # # [top_span_num, top_span_num]
         # return (

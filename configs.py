@@ -71,7 +71,7 @@ class Dir:
 
 logs_dir = Dir('logs')
 ckpts_dir = Dir('ckpts')
-data_dir = Dir('topicclass')
+data_dir = Dir('data')
 # lm_ckpts_dir = 'lm_ckpts'
 
 best_ckpt_path = f'{ckpts_dir}/ckpt.best'

@@ -132,8 +132,10 @@ class CharVocab:
 
     def __init__(self):
         assert os.path.exists(CharVocab.path)
-        self.id_to_char = ['<pad>', '<unk>']
-        self.padding_id, self.unk_id = range(len(self.id_to_char))
+        # self.id_to_char = ['<pad>', '<unk>']
+        self.id_to_char = ['<unk>']
+        # self.padding_id, self.unk_id = range(len(self.id_to_char))
+        self.unk_id, = range(len(self.id_to_char))
 
         with open(CharVocab.path) as vocab_file:
             self.id_to_char.extend(map(lambda s: s.strip(), vocab_file.readlines()))

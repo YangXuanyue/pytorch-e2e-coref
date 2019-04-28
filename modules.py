@@ -273,6 +273,7 @@ class DocEncoder(nn.Module):
         input_seq_batch = embedding_seq_batch
 
         for i in range(self.layer_num):
+            # [sent_num, max_sent_len, hidden_size]
             output_seq_batch = self.bi_lstms[i](input_seq_batch)
             output_seq_batch = F.dropout(output_seq_batch, configs.lstm_dropout_prob, training=self.training)
 
@@ -280,8 +281,10 @@ class DocEncoder(nn.Module):
                 g = self.highway_gates[i - 1](output_seq_batch)
                 output_seq_batch = g * output_seq_batch + (1 - g) * input_seq_batch
 
+            # [sent_num, max_sent_len, hidden_size]
             input_seq_batch = output_seq_batch
 
+        # [doc_len, hidden_size]
         return input_seq_batch[len_mask_batch]
 
 

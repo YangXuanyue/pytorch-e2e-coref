@@ -48,8 +48,8 @@ names = ('train', 'dev') if configs.training \
 class Dataset(tud.Dataset):
     def __init__(self, name):
         self.name = name
-        self.examples = json.load(open(f'{self.name}.json'))
-        self.elmo_cache = h5py.File(f'{self.name}.elmo.cache.hdf5', 'r', swmr=True)
+        self.examples = json.load(open(f'{configs.data_dir}/{self.name}.json'))
+        self.elmo_cache = h5py.File(f'{configs.data_dir}/{self.name}.elmo.cache.hdf5', 'r', swmr=True)
 
     def __len__(self):
         return len(self.examples)
