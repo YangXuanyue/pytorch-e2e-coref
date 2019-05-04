@@ -4,11 +4,12 @@ from model_utils import *
 import time
 import random
 import os
+import shutil
 
 thread_num = 8
 torch.set_num_threads(thread_num)
 
-if 'jupyter' in os.environ:
+if 'JUPYTER' in os.environ:
     from collections import namedtuple
     args = namedtuple(
         'Args', 'mode ckpt tgpu b l seed'
@@ -75,12 +76,17 @@ class Dir:
 logs_dir = Dir('logs')
 ckpts_dir = Dir('ckpts')
 data_dir = Dir('data')
+configs_pys_dir = Dir('configs_pys')
+
+shutil.copyfile('configs.py', f'{configs_pys_dir}/configs.{timestamp}.py')
+
+
 # lm_ckpts_dir = 'lm_ckpts'
 
 best_ckpt_path = f'{ckpts_dir}/ckpt.best'
 
-uses_glove_embeddings = True
-uses_char_embeddings = True
+uses_glove_embeddings = False
+uses_char_embeddings = False
 
 glove_embeddings_path = 'glove.840B.300d.txt.filtered' if training else 'glove.840B.300d.txt'
 glove_embedding_dim = 300 if uses_glove_embeddings else 0
@@ -153,7 +159,7 @@ word_embeddings_path = 'word_embeddings_files/' \
 word_embedding_dim = 300
 inits_embedder = True
 freezes_embeddings = True  # False
-embedder_training_epoch_num = 100
+embedder_training_epoch_num = 200
 uses_new_embeddings = False
 
 hidden_size = 256
@@ -167,28 +173,31 @@ class_num = -1  # to be changed
 # adam_lr = 1e-4
 # adadelta_lr = 1e-2
 
-initial_lr = 1e-3
+initial_lr = 5e-4
 lr_decay_rate = .999
 lr_decay_freq = 100
 
 max_grad_norm = 5.
 
 # lm_lr = 5e-5
-sets_new_lr = False
+sets_new_lr = True
 batch_size = 256
 uses_bi_rnn = True
 rnn_type = 'lstm'
 # rnn_type = 'gru'
 min_logit = -1e3
 
-lstm_dropout_prob = .2
-embedding_dropout_prob = .5
+lstm_dropout_prob = .4
+embedding_dropout_prob = .25
 dropout_prob = .2
 
 momentum = .9
 l2_weight_decay = 5e-4  # args.weight_decay
 # feature_num = 512
-max_f1_path = 'max_f1.txt'
+max_f1_path = f'max_f1.{timestamp}.txt'
+
+with open(max_f1_path, 'w') as max_f1_file:
+    print(0., file=max_f1_file)
 
 epoch_num = 100
 
@@ -224,7 +233,7 @@ decoder_device_id = 1
 per_node_beam_width = 32
 beam_width = 32
 
-uses_new_optimizer = False
+uses_new_optimizer = True
 
 uses_self_attention = True
 
@@ -235,3 +244,15 @@ uses_lang_model = False
 use_multi_head_attention = False
 
 # uses_lm = not training and False
+
+layer_idx_for_pos_tag_prediction = -1
+assert -1 <= layer_idx_for_pos_tag_prediction < rnn_layer_num
+predicts_pos_tags = layer_idx_for_pos_tag_prediction > -1
+supervises_multi_layers_of_ant_scores = True
+supervises_unpruned_fast_ant_scores = False
+supervises_mention_scores = False
+
+resets_max_f1 = True
+restarts = True
+
+compacts_sents = True

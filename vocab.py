@@ -156,9 +156,36 @@ class CharVocab:
             return self.id_to_char[char_or_id]
 
 
+class PosTagVocab:
+    path = f'pos_tag_vocab.txt'
+
+    def __init__(self):
+        assert os.path.exists(PosTagVocab.path)
+
+        with open(PosTagVocab.path) as vocab_file:
+            self.id_to_pos_tag = list(
+                map(lambda s: s.strip(), vocab_file.readlines())
+            )
+
+        self.pos_tag_to_id = {
+            pos_tag: id_
+            for id_, pos_tag in enumerate(self.id_to_pos_tag)
+        }
+        self.padding_id = self.pos_tag_to_id['<pad>']
+        self.size = len(self.id_to_pos_tag)
+
+        assert len(self.pos_tag_to_id) == self.size
+
+    def __getitem__(self, pos_tag_or_id):
+        if isinstance(pos_tag_or_id, str):
+            return self.pos_tag_to_id[pos_tag_or_id]
+        else:
+            return self.id_to_pos_tag[pos_tag_or_id]
+
+
 class WordEmbedder:
     def __init__(self, path, dim, normalizes=True):
-        self.normalizes = normalizes
+        self.normalizes_embedding = normalizes
         self.path = path
         self.dim = dim
         self.embeddings = self.load_embeddings()
@@ -166,6 +193,15 @@ class WordEmbedder:
 
     def __len__(self):
         return self.size
+
+    @staticmethod
+    def normalize(embedding):
+        norm = np.linalg.norm(embedding)
+
+        if norm > 0.:
+            return embedding / norm
+        else:
+            return embedding
 
     def load_embeddings(self):
         default_embedding = torch.zeros(self.dim)
@@ -188,7 +224,7 @@ class WordEmbedder:
                 # word = line[:word_end]
                 # embedding = np.fromstring(line[word_end + 1:], np.float3232, sep=" ")
                 # assert len(embedding) == self.size
-                embeddings[word] = embedding
+                embeddings[word] = self.normalize(embedding) if self.normalizes_embedding else embedding
 
         print(f'loaded embeddings from {self.path} in {time.time() - start_time:.5f}s')
 
@@ -200,15 +236,7 @@ class WordEmbedder:
     def __getitem__(self, word):
         embedding = self.embeddings[word]
 
-        if self.normalizes:
+        if self.normalizes_embedding:
             embedding = self.normalize(embedding)
 
         return embedding
-
-    def normalize(self, embedding):
-        norm = np.linalg.norm(embedding)
-
-        if norm > 0.:
-            return embedding / norm
-        else:
-            return embedding

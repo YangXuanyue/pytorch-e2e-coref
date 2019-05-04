@@ -1,1 +1,1 @@
-CUDA_VISIBLE_DEVICES=4,5 python runner.py -m test -l
+CUDA_VISIBLE_DEVICES=4 python test.py -m test

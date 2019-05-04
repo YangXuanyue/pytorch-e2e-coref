@@ -14,7 +14,11 @@ class Model(nn.Module):
             vocab_size=data_utils.char_vocab.size, padding_id=data_utils.char_vocab.unk_id
         ) if configs.uses_char_embeddings else None
         self.elmo_layer_output_mixer = ElmoLayerOutputMixer().cuda()
-        self.encoder = DocEncoder(input_size=configs.tot_embedding_dim).cuda()
+        self.encoder = DocEncoder(
+            input_size=configs.tot_embedding_dim,
+            pos_tag_vocab_size=data_utils.pos_tag_vocab.size
+        ).cuda()
+
         self.span_width_embedder = nn.Embedding(
             num_embeddings=configs.max_span_width,
             embedding_dim=configs.span_width_embedding_dim
@@ -227,12 +231,12 @@ class Model(nn.Module):
         self,
         # [sent_num, max_sent_len, glove_embedding_dim]
         glove_embedding_seq_batch,
-        # [sent_num, max_sent_len, raw_head_embedding_dim]
-        head_embedding_seq_batch,
+        # [doc_len, raw_head_embedding_dim]
+        head_embeddings,
         # [sent_num, max_sent_len, elmo_embedding_dim, elmo_layer_num]
         elmo_layer_outputs_batch,
-        # [sent_num, max_sent_len, max_word_len]
-        char_ids_seq_batch,
+        # [doc_len, max_word_len]
+        flat_char_ids_seq_batch,
         # [sent_num]
         sent_len_batch,
         # [doc_len]
@@ -251,15 +255,17 @@ class Model(nn.Module):
         cand_end_idxes,
         # [cand_num]
         cand_cluster_ids,
-        # [cand_num]
-        cand_sent_idxes
+        # # [cand_num]
+        # cand_sent_idxes
     ):
         start_time = time.time()
 
-        sent_num, max_sent_len, *_ = char_ids_seq_batch.shape
+        sent_num, max_sent_len, *_ = elmo_layer_outputs_batch.shape
 
-        char_embedding_seq_batch = self.char_cnn_embedder(char_ids_seq_batch) \
-            if configs.uses_char_embeddings else None
+        # [sent_num, max_sent_len, feature_num], [doc_len, feature_num]
+        char_embedding_seq_batch, flat_char_embedding_seq_batch = \
+            self.char_cnn_embedder(flat_char_ids_seq_batch, sent_len_batch) \
+                if configs.uses_char_embeddings else (None, None)
         elmo_embedding_seq_batch = self.elmo_layer_output_mixer(elmo_layer_outputs_batch)
 
         embedding_seq_batches = []
@@ -267,25 +273,25 @@ class Model(nn.Module):
         if configs.uses_glove_embeddings:
             embedding_seq_batches.append(glove_embedding_seq_batch)
 
-        head_embedding_seq_batches = [head_embedding_seq_batch]
+        head_embeddings_list = [head_embeddings]
 
         if configs.uses_char_embeddings:
             embedding_seq_batches.append(char_embedding_seq_batch)
-            head_embedding_seq_batches.append(char_embedding_seq_batch)
+            head_embeddings_list.append(flat_char_embedding_seq_batch)
 
         embedding_seq_batches.append(elmo_embedding_seq_batch)
 
         # [sent_num, max_sent_len, tot_embedding_dim]
         word_embedding_seq_batch = torch.cat(embedding_seq_batches, dim=-1)
-        # [sent_num, max_sent_len, head_embedding_dim]
-        head_embedding_seq_batch = torch.cat(head_embedding_seq_batches, dim=-1)
+        # [doc_len, head_embedding_dim]
+        head_embeddings = torch.cat(head_embeddings_list, dim=-1)
         # [sent_num, max_sent_len, tot_embedding_dim]
         word_embedding_seq_batch = F.dropout(
             word_embedding_seq_batch, p=configs.embedding_dropout_prob, training=self.training
         )
-        # [sent_num, max_sent_len, head_embedding_dim]
-        head_embedding_seq_batch = F.dropout(
-            head_embedding_seq_batch, p=configs.embedding_dropout_prob, training=self.training
+        # [doc_len, head_embedding_dim]
+        head_embeddings = F.dropout(
+            head_embeddings, p=configs.embedding_dropout_prob, training=self.training
         )
 
         # try:
@@ -294,19 +300,19 @@ class Model(nn.Module):
         # except:
         #     breakpoint()
 
-        # [doc_len, hidden_size]
-        encoded_doc = self.encoder(word_embedding_seq_batch, sent_len_batch, len_mask_batch)
+        # [doc_len, hidden_size], [doc_len, pos_tag_num]
+        encoded_doc, pos_tag_logits = self.encoder(word_embedding_seq_batch, sent_len_batch, len_mask_batch)
 
         doc_len, _ = encoded_doc.shape
 
         assert doc_len == sent_len_batch.sum().item()
 
-        # [doc_len, head_emb]
-        head_embedding_seq = head_embedding_seq_batch[len_mask_batch]
+        # # [doc_len, head_emb]
+        # head_embeddings = head_embedding_seq_batch[len_mask_batch]
 
         # [cand_num, span_embedding_dim]
         cand_span_embeddings = self.embed_spans(
-            head_embedding_seq, encoded_doc,
+            head_embeddings, encoded_doc,
             cand_start_idxes, cand_end_idxes
         )
 
@@ -337,7 +343,7 @@ class Model(nn.Module):
         # [top_cand_num]
         top_span_mention_scores = cand_mention_scores[top_span_idxes]
 
-        top_span_sent_idxes = cand_sent_idxes[top_span_idxes]
+        # top_span_sent_idxes = cand_sent_idxes[top_span_idxes]
 
         # try:
         # [top_cand_num]
@@ -353,7 +359,9 @@ class Model(nn.Module):
             # [top_span_num, pruned_ant_num], [top_span_num, pruned_ant_num]
             top_ant_idxes_of_spans, top_ant_mask_of_spans,
             # [top_span_num, pruned_ant_num], [top_span_num, pruned_ant_num]
-            top_fast_ant_scores_of_spans, top_ant_offsets_of_spans
+            top_fast_ant_scores_of_spans, top_ant_offsets_of_spans,
+            # [top_span_num, top_span_num], [top_span_num, top_span_num]
+            full_fast_ant_scores_of_spans, full_ant_mask_of_spans
         ) = self.prune(
             # [top_cand_num, span_embedding_dim]
             top_span_embeddings,
@@ -375,6 +383,20 @@ class Model(nn.Module):
         # [genre_embedding_dim]
         genre_embedding = self.genre_embedder(genre_id.view(1, 1).cuda()).view(-1)
 
+        list_of_top_ant_scores_of_spans = []
+
+        if configs.supervises_multi_layers_of_ant_scores:
+            list_of_top_ant_scores_of_spans.append(
+                torch.cat(
+                    (
+                        # [top_cand_num, 1]
+                        dummy_scores,
+                        # [top_cand_num, pruned_ant_num]
+                        top_fast_ant_scores_of_spans
+                    ), dim=1
+                )
+            )
+
         for i in range(configs.coref_depth):
             # for i in range(1):
             # print(f'depth {i}')
@@ -383,7 +405,7 @@ class Model(nn.Module):
             top_ant_embeddings_of_spans = top_span_embeddings[top_ant_idxes_of_spans]
             # [top_cand_num, pruned_ant_num]
             top_ant_scores_of_spans = top_fast_ant_scores_of_spans
-            top_ant_scores_of_spans += self.get_slow_ant_scores_of_spans(
+            top_slow_ant_scores_of_spans = self.get_slow_ant_scores_of_spans(
                 # [top_cand_num, span_embedding_dim]
                 top_span_embeddings,
                 # [top_span_num, pruned_ant_num]
@@ -398,15 +420,40 @@ class Model(nn.Module):
                 genre_embedding
             )
 
+            top_ant_scores_of_spans += top_slow_ant_scores_of_spans
+
+            # [top_cand_num, 1 + pruned_ant_num]
+            top_ant_scores_of_spans = torch.cat(
+                (
+                    # [top_cand_num, 1]
+                    dummy_scores,
+                    # [top_cand_num, pruned_ant_num]
+                    top_ant_scores_of_spans
+
+                    # # [top_span_num, pruned_ant_num]
+                    # top_fast_ant_scores_of_spans
+                ), dim=1
+            )
+
+            if configs.supervises_multi_layers_of_ant_scores:
+                list_of_top_ant_scores_of_spans.append(
+                    torch.cat(
+                        (
+                            # [top_cand_num, 1]
+                            dummy_scores,
+                            # [top_cand_num, pruned_ant_num]
+                            top_slow_ant_scores_of_spans
+                        ), dim=1
+                    )
+                )
+
             if i == configs.coref_depth - 1:
                 break
 
             # [top_cand_num, 1 + pruned_ant_num]
             top_ant_attentions_of_spans = F.softmax(
                 # [top_cand_num, 1 + pruned_ant_num]
-                torch.cat(
-                    (dummy_scores, top_ant_scores_of_spans), dim=1
-                ), dim=-1
+                top_ant_scores_of_spans, dim=-1
             )
             # [top_cand_num, 1 + pruned_ant_num, span_embedding_dim]
             top_ant_embeddings_of_spans = torch.cat(
@@ -432,21 +479,20 @@ class Model(nn.Module):
             top_span_embeddings = g * attended_top_span_embeddings + (1. - g) * top_span_embeddings
             # top_span_embeddings = attended_top_span_embeddings
 
-        # [top_cand_num, 1 + pruned_ant_num]
-        top_ant_scores_of_spans = torch.cat(
-            (
-                # [top_cand_num, 1]
-                dummy_scores,
-                # [top_cand_num, pruned_ant_num]
-                top_ant_scores_of_spans
-
-                # # [top_span_num, pruned_ant_num]
-                # top_fast_ant_scores_of_spans
-            ), dim=1
-        )
+        list_of_top_ant_scores_of_spans.append(top_ant_scores_of_spans)
 
         # [top_cand_num, pruned_ant_num]
         top_ant_cluster_ids_of_spans = top_span_cluster_ids[top_ant_idxes_of_spans]
+
+        # [top_span_num, 1 + top_span_num]
+        full_fast_ant_scores_of_spans = torch.cat(
+            (
+                # [top_span_num, 1]
+                dummy_scores,
+                # [top_span_num, top_span_num]
+                full_fast_ant_scores_of_spans
+            ), dim=1
+        )
 
         return (
             # [cand_num]
@@ -461,10 +507,16 @@ class Model(nn.Module):
             top_ant_idxes_of_spans,
             # [top_cand_num, pruned_ant_num]
             top_ant_cluster_ids_of_spans,
-            # [top_cand_num, 1 + pruned_ant_num]
-            top_ant_scores_of_spans,
+            # # [top_cand_num, 1 + pruned_ant_num]
+            # top_ant_scores_of_spans,
+            # 4 * [top_cand_num, 1 + pruned_ant_num]
+            list_of_top_ant_scores_of_spans,
             # [top_span_num, pruned_ant_num]
-            top_ant_mask_of_spans
+            top_ant_mask_of_spans,
+            # [doc_len, pos_tag_num]
+            pos_tag_logits,
+            # [top_span_num, 1 + top_span_num], [top_span_num, top_span_num]
+            full_fast_ant_scores_of_spans, full_ant_mask_of_spans
         )
 
     def get_slow_ant_scores_of_spans(
@@ -492,7 +544,7 @@ class Model(nn.Module):
         )
         # [top_span_num, pruned_ant_num, ant_offset_embedding_dim]
         ant_offset_embeddings_of_spans = self.ant_offset_embedder(
-            self.get_offset_bucket_idxes_batch(top_ant_offsets_of_spans).cuda()
+            Model.get_offset_bucket_idxes_batch(top_ant_offsets_of_spans).cuda()
         )
         feature_embeddings_of_spans = torch.cat(
             (
@@ -543,25 +595,25 @@ class Model(nn.Module):
         # [top_span_num, top_span_num]
         ant_offsets_of_spans = span_idxes.view(-1, 1) - span_idxes.view(1, -1)
         # [top_span_num, top_span_num]
-        ants_mask_of_spans = ant_offsets_of_spans >= 1
+        full_ant_mask_of_spans = ant_offsets_of_spans >= 1
         # [top_span_num, top_span_num]
-        fast_ant_scores_of_spans = top_span_mention_scores.view(-1, 1) + top_span_mention_scores.view(1, -1)
-        # fast_ant_scores_of_spans = fast_ant_scores_of_spans.cuda(1)
-        fast_ant_scores_of_spans += torch.log(ants_mask_of_spans.float()).cuda()
-        fast_ant_scores_of_spans += self.get_fast_ant_scores_of_spans(top_span_embeddings)
+        full_fast_ant_scores_of_spans = top_span_mention_scores.view(-1, 1) + top_span_mention_scores.view(1, -1)
+        # full_fast_ant_scores_of_spans = full_fast_ant_scores_of_spans.cuda(1)
+        full_fast_ant_scores_of_spans += torch.log(full_ant_mask_of_spans.float()).cuda()
+        full_fast_ant_scores_of_spans += self.get_fast_ant_scores_of_spans(top_span_embeddings)
 
         # [top_span_num, pruned_ant_num]
         _, top_ant_idxes_of_spans = torch.topk(
             # [top_span_num, top_span_num]
-            fast_ant_scores_of_spans, k=pruned_ant_num, dim=-1, sorted=False
+            full_fast_ant_scores_of_spans, k=pruned_ant_num, dim=-1, sorted=False
         )
         top_ant_idxes_of_spans = top_ant_idxes_of_spans.cpu()
         # [top_span_num, 1]
         span_idxes = span_idxes.view(-1, 1)
         # [top_span_num, pruned_ant_num]
-        top_ant_mask_of_spans = ants_mask_of_spans[span_idxes, top_ant_idxes_of_spans]
+        top_ant_mask_of_spans = full_ant_mask_of_spans[span_idxes, top_ant_idxes_of_spans]
         # [top_span_num, pruned_ant_num]
-        top_fast_ant_scores_of_spans = fast_ant_scores_of_spans[span_idxes, top_ant_idxes_of_spans]
+        top_fast_ant_scores_of_spans = full_fast_ant_scores_of_spans[span_idxes, top_ant_idxes_of_spans]
         # [top_span_num, pruned_ant_num]
         top_ant_offsets_of_spans = ant_offsets_of_spans[span_idxes, top_ant_idxes_of_spans]
 
@@ -569,7 +621,9 @@ class Model(nn.Module):
             # [top_span_num, pruned_ant_num], [top_span_num, pruned_ant_num]
             top_ant_idxes_of_spans, top_ant_mask_of_spans,
             # [top_span_num, pruned_ant_num], [top_span_num, pruned_ant_num]
-            top_fast_ant_scores_of_spans, top_ant_offsets_of_spans
+            top_fast_ant_scores_of_spans, top_ant_offsets_of_spans,
+            # [top_span_num, top_span_num], [top_span_num, top_span_num]
+            full_fast_ant_scores_of_spans, full_ant_mask_of_spans
         )
 
     def get_fast_ant_scores_of_spans(
@@ -597,7 +651,8 @@ class Model(nn.Module):
         #         ) @ F.dropout(top_span_embeddings, p=configs.dropout_prob, training=self.training).t()
         # ).cuda()
 
-    def get_offset_bucket_idxes_batch(self, offsets_batch):
+    @staticmethod
+    def get_offset_bucket_idxes_batch(offsets_batch):
         """
         [0, 1, 2, 3, 4, 5-7, 8-15, 16-31, 32-63, 64+].
         """
@@ -609,110 +664,3 @@ class Model(nn.Module):
             identity_mask_batch * offsets_batch + (1 - identity_mask_batch) * log_space_idxes_batch,
             min=0, max=9
         )
-
-    def compute_loss(self, *input_tensors):
-        start_time = time.time()
-
-        (
-            # [cand_num]
-            cand_mention_scores,
-            # [top_cand_num]
-            top_start_idxes,
-            # [top_cand_num]
-            top_end_idxes,
-            # [top_cand_num]
-            top_span_cluster_ids,
-            # [top_span_num, pruned_ant_num]
-            top_ant_idxes_of_spans,
-            # [top_cand_num, pruned_ant_num]
-            top_ant_cluster_ids_of_spans,
-            # [top_cand_num, 1 + pruned_ant_num]
-            top_ant_scores_of_spans,
-            # [top_span_num, pruned_ant_num]
-            top_ant_mask_of_spans
-        ) = self(*input_tensors)
-
-        # print(f'forward: {time.time() - start_time}')
-
-        top_ant_cluster_ids_of_spans += torch.log(top_ant_mask_of_spans.float()).long()
-        # [top_cand_num, pruned_ant_num]
-        ant_indicators_of_spans = top_ant_cluster_ids_of_spans == top_span_cluster_ids.view(-1, 1)
-        # [top_cand_num, 1]
-        non_dummy_span_mask = (top_span_cluster_ids > 0).view(-1, 1)
-        # [top_cand_num, pruned_ant_num]
-        non_dummy_ant_indicators_of_spans = ant_indicators_of_spans & non_dummy_span_mask
-        # [top_cand_num, 1]
-        dummy_span_indicators = ~non_dummy_ant_indicators_of_spans.any(dim=1, keepdim=True)
-        # [top_cand_num, 1 + pruned_ant_num]
-        ant_indicators_of_spans = torch.cat(
-            (dummy_span_indicators, non_dummy_ant_indicators_of_spans), dim=1
-        )
-        # [top_cand_num]
-        log_marginalized_prob_of_spans = (
-            torch.logsumexp(
-                top_ant_scores_of_spans + torch.log(ant_indicators_of_spans.float()).cuda(),
-                dim=1
-            ) - torch.logsumexp(top_ant_scores_of_spans, dim=1)
-        )
-
-        return -log_marginalized_prob_of_spans.sum()
-
-    def predict(self, *input_tensors):
-        (
-            # [cand_num]
-            cand_mention_scores,
-            # [top_cand_num]
-            top_start_idxes,
-            # [top_cand_num]
-            top_end_idxes,
-            # [top_cand_num]
-            top_span_cluster_ids,
-            # [top_span_num, pruned_ant_num]
-            top_ant_idxes_of_spans,
-            # [top_cand_num, pruned_ant_num]
-            top_ant_cluster_ids_of_spans,
-            # [top_cand_num, 1 + pruned_ant_num]
-            top_ant_scores_of_spans,
-            # [top_span_num, pruned_ant_num]
-            top_ant_mask_of_spans
-        ) = self(*input_tensors)
-
-        predicted_ant_idxes = []
-
-        for span_idx, loc in enumerate(torch.argmax(top_ant_scores_of_spans, dim=1) - 1):
-            if loc < 0:
-                predicted_ant_idxes.append(-1)
-            else:
-                predicted_ant_idxes.append(top_ant_idxes_of_spans[span_idx, loc].item())
-
-        span_to_predicted_cluster_id = {}
-        predicted_clusters = []
-
-        for span_idx, ant_idx in enumerate(predicted_ant_idxes):
-            if ant_idx < 0:
-                continue
-
-            assert span_idx > ant_idx
-
-            ant_span = top_start_idxes[ant_idx].item(), top_end_idxes[ant_idx].item()
-
-            if ant_span in span_to_predicted_cluster_id:
-                predicted_cluster_id = span_to_predicted_cluster_id[ant_span]
-            else:
-                predicted_cluster_id = len(predicted_clusters)
-                predicted_clusters.append([ant_span])
-                span_to_predicted_cluster_id[ant_span] = predicted_cluster_id
-
-            span = top_start_idxes[span_idx].item(), top_end_idxes[span_idx].item()
-            predicted_clusters[predicted_cluster_id].append(span)
-            span_to_predicted_cluster_id[span] = predicted_cluster_id
-
-        predicted_clusters = [tuple(cluster) for cluster in predicted_clusters]
-        span_to_predicted_cluster = {
-            span: predicted_clusters[cluster_id]
-            for span, cluster_id in span_to_predicted_cluster_id.items()
-        }
-
-        # [top_cand_num], [top_cand_num], [top_cand_num]
-        return top_start_idxes, top_end_idxes, predicted_ant_idxes, \
-               predicted_clusters, span_to_predicted_cluster

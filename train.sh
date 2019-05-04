@@ -1,1 +1,1 @@
-CUDA_VISIBLE_DEVICES=2 python runner.py
+CUDA_VISIBLE_DEVICES=0 python runner.py

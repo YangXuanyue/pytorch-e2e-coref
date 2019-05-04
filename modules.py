@@ -99,25 +99,194 @@ class CharCnnEmbedder(nn.Module):
 
     def forward(
         self,
-        # [batch_size, max_sent_len, max_word_num]
-        char_ids_seq_batch
+        # [doc_len, max_word_num]
+        flat_char_ids_seq_batch,
+        # [batch_size]
+        len_batch
     ):
         # print(char_ids_seq_batch.device)
         # print(self.embedder.weight.device)
-        batch_size, max_sent_len, max_word_num = char_ids_seq_batch.shape
-        # [batch_size * max_sent_len, max_word_num, char_embedding_dim]
-        char_embedding_seq_batch = self.embedder(char_ids_seq_batch).view(-1, max_word_num, configs.char_embedding_dim)
-        # [batch_size * max_sent_len, char_embedding_dim, max_word_num]
-        char_embedding_seq_batch = char_embedding_seq_batch.transpose_(1, 2)
+        doc_len, max_word_num = flat_char_ids_seq_batch.shape
+        # [doc_len, max_word_num, char_embedding_dim]
+        raw_flat_char_embeddings_seq_batch = self.embedder(flat_char_ids_seq_batch).view(-1, max_word_num, configs.char_embedding_dim)
+        # [doc_len, char_embedding_dim, max_word_num]
+        raw_flat_char_embeddings_seq_batch = raw_flat_char_embeddings_seq_batch.transpose_(1, 2)
 
-        # [batch_size, feature_num]
-        return torch.cat(
-            [
-                # [batch_size * max_sent_len, kernel_num]
-                feature_extractor(char_embedding_seq_batch)
+        # [doc_len, feature_num]
+        flat_char_embedding_seq_batch = torch.cat(
+            tuple(
+                # [doc_len * max_sent_len, kernel_num]
+                feature_extractor(raw_flat_char_embeddings_seq_batch)
                 for feature_extractor in self.feature_extractors
-            ], dim=-1
-        ).view(batch_size, max_sent_len, configs.char_feature_num)
+            ), dim=-1
+        ).view(doc_len, configs.char_feature_num)
+
+        max_len = len_batch.max().item()
+        char_embedding_seq_batch = []
+
+        curr_word_idx = 0
+
+        device = flat_char_embedding_seq_batch.device
+
+        for len_ in map(lambda l: l.item(), len_batch):
+            char_embedding_seq_batch.append(
+                # [max_len, feature_num]
+                torch.cat(
+                    (
+                        # [len_, feature_num]
+                        flat_char_embedding_seq_batch[curr_word_idx:(curr_word_idx + len_)],
+                        # [max_len - len_, feature_num]
+                        torch.zeros((max_len - len_, configs.char_feature_num)).float().to(device)
+                    ), dim=0
+                )
+            )
+
+        # [batch_size, max_len, feature_num]
+        return torch.stack(
+            # batch_size * [max_len, feature_num]
+            char_embedding_seq_batch, dim=0
+        ), flat_char_embedding_seq_batch
+
+
+class Identity(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x
+
+
+class ScaledDotProdAttention(nn.Module):
+    # http://nlp.seas.harvard.edu/2018/04/03/attention.html
+    def __init__(
+        self,
+        raw_key_size,
+        raw_value_size,
+        raw_query_size,
+        projects_key_value_query=True,
+        detaches_key_value=False
+    ):
+        super().__init__()
+        self.raw_key_size = raw_key_size
+        self.raw_value_size = raw_value_size
+        self.raw_query_size = raw_query_size
+        self.keys_batch, self.values_batch, self.masks_batch = None, None, None
+        self.factor = configs.query_size ** -.5
+        self.min_score = -1e30
+        self.projects_key_value_query = projects_key_value_query
+
+        if not self.projects_key_value_query:
+            assert self.raw_key_size == configs.key_size
+            assert self.raw_value_size == configs.value_size
+            assert self.raw_query_size == configs.query_size
+
+        self.key_projector = nn.Linear(self.raw_key_size, configs.key_size) \
+            if self.projects_key_value_query else Identity()
+        self.value_projector = nn.Linear(self.raw_value_size, configs.value_size)  \
+            if self.projects_key_value_query else Identity()
+        self.query_projector = nn.Linear(self.raw_query_size, configs.query_size)  \
+            if self.projects_key_value_query else Identity()
+
+    def clear(self):
+        self.keys_batch, self.values_batch, self.masks_batch = None, None, None
+
+    def set(
+        self,
+        # [batch_size, seq_len, raw_key_size]
+        raw_keys_batch,
+        # [batch_size, seq_len, raw_value_size]
+        raw_values_batch,
+        # [batch_size, seq_len]
+        masks_batch=None
+    ):
+
+        # [batch_size, seq_len, key_size]
+        self.keys_batch = self.key_projector(raw_keys_batch)
+        # [batch_size, seq_len, key_size, 1]
+        self.keys_batch = self.keys_batch.view(*self.keys_batch.shape, 1)
+        self.batch_size, *_ = self.keys_batch.shape
+        # [batch_size, seq_len, value_size]
+        self.values_batch = self.value_projector(raw_values_batch)
+        # [batch_size, seq_len]
+        self.masks_batch = masks_batch
+
+    def append(
+        self,
+        # [batch_size, raw_key_size]
+        raw_key_batch,
+        # [batch_size, raw_value_size]
+        raw_value_batch,
+        # [batch_size]
+        mask_batch=None
+    ):
+        self.batch_size, _ = raw_key_batch.shape
+        # [batch_size, 1, key_size, 1]
+        key_batch = self.key_projector(raw_key_batch).view(self.batch_size, 1, -1, 1)
+        # [batch_size, 1, key_size]
+        value_batch = self.value_projector(raw_value_batch).view(self.batch_size, 1, -1)
+
+        if mask_batch is not None:
+            mask_batch = mask_batch.view(self.batch_size, 1)
+
+        if self.keys_batch is None:
+            self.keys_batch, self.values_batch, self.masks_batch = key_batch, value_batch, mask_batch
+        else:
+            # [batch_size, seq_len, key_size, 1]
+            self.keys_batch = torch.cat(
+                (self.keys_batch, key_batch),
+                dim=1
+            )
+            # [batch_size, seq_len, key_size]
+            self.values_batch = torch.cat(
+                (self.values_batch, value_batch),
+                dim=1
+            )
+
+            if mask_batch is not None:
+                # [batch_size, seq_len]
+                self.masks_batch = torch.cat(
+                    (self.masks_batch, mask_batch),
+                    dim=1
+                )
+
+    # a workaround for reindexing in beam search
+    def __getitem__(
+        self,
+        # [batch_size]
+        idx_batch
+    ):
+        # [batch_size, seq_len, key_size, 1]
+        self.keys_batch = self.keys_batch[idx_batch]
+        # [batch_size, seq_len, key_size]
+        self.values_batch = self.values_batch[idx_batch]
+        # [batch_size, seq_len]
+        self.masks_batch = self.masks_batch[idx_batch]
+
+        return self
+
+    def forward(
+        self,
+        # [batch_size, raw_query_size]
+        raw_query_batch,
+    ):
+        # [batch_size, 1, 1, query_size]
+        query_batch = self.query_projector(raw_query_batch).view(self.batch_size, 1, 1, -1)
+        # [batch_size, seq_len]
+        # = ([batch_size, 1, 1, query_size] @ [batch_size, seq_len, key_size, 1]).view(batch_size, seq_len)
+        scores_batch = (query_batch @ self.keys_batch).view(self.batch_size, -1)
+
+        if self.masks_batch is not None:
+            scores_batch[self.masks_batch] = self.min_score
+
+        # [batch_size, 1, seq_len]
+        self.scores_batch = F.softmax(
+            scores_batch * self.factor,
+            dim=-1
+        ).view(self.batch_size, 1, -1)
+        # [batch_size, value_size]
+        # = ([batch_size, 1, seq_len] @ [batch_size, seq_len, value_size]).view(batch_size, value_size)
+        return (self.scores_batch @ self.values_batch).view(self.batch_size, -1)
+
 
 
 class LstmCell(nn.Module):
@@ -162,6 +331,7 @@ class LstmCell(nn.Module):
         new_cell_state_batch = (1. - i) * cell_state_batch + i * torch.tanh(j)
         new_hidden_state_batch = torch.tanh(new_cell_state_batch) * torch.sigmoid(o)
         return new_cell_state_batch, new_hidden_state_batch
+
 
     def forward(
         self,
@@ -232,13 +402,15 @@ class DocEncoder(nn.Module):
         self,
         input_size,
         hidden_size=configs.rnn_hidden_size,
-        layer_num=configs.rnn_layer_num
+        layer_num=configs.rnn_layer_num,
+        pos_tag_vocab_size=0
     ):
         super().__init__()
 
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.layer_num = layer_num
+        self.pos_tag_vocab_size = pos_tag_vocab_size
 
         self.bi_lstms = nn.ModuleList(
             [
@@ -261,6 +433,9 @@ class DocEncoder(nn.Module):
                 for _ in range(self.layer_num - 1)
             ]
         )
+        self.pos_tag_classifier = nn.Linear(
+            configs.rnn_hidden_size, pos_tag_vocab_size
+        ) if configs.predicts_pos_tags else None
 
     def forward(
         self,
@@ -274,11 +449,18 @@ class DocEncoder(nn.Module):
         sent_num, max_sent_len, _ = embedding_seq_batch.shape
 
         input_seq_batch = embedding_seq_batch
+        pos_tag_logits = None
 
         for i in range(self.layer_num):
             # [sent_num, max_sent_len, hidden_size]
             output_seq_batch = self.bi_lstms[i](input_seq_batch)
             output_seq_batch = F.dropout(output_seq_batch, configs.lstm_dropout_prob, training=self.training)
+
+            if i == configs.layer_idx_for_pos_tag_prediction:
+                # [doc_len, pos_tag_num]
+                pos_tag_logits = self.pos_tag_classifier(
+                    output_seq_batch[len_mask_batch]
+                )
 
             if i > 0:
                 g = self.highway_gates[i - 1](output_seq_batch)
@@ -287,8 +469,8 @@ class DocEncoder(nn.Module):
             # [sent_num, max_sent_len, hidden_size]
             input_seq_batch = output_seq_batch
 
-        # [doc_len, hidden_size]
-        return input_seq_batch[len_mask_batch]
+        # [doc_len, hidden_size], [doc_len, pos_tag_num]
+        return input_seq_batch[len_mask_batch], pos_tag_logits
 
 
 
